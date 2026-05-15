@@ -1,0 +1,24 @@
+
+- [x] Manual bank account mapping UI with dropdowns (assign any Xero account to a PF category)
+- [x] This year vs last year toggle/comparison on Historical tab
+- [x] Split Historical content into sub-tabs (Summary Table, PF% Charts, Year Comparison)
+- [x] Pull 2 full years of Xero data in a single query using getTwoYearData for year-on-year comparison
+- [x] Show money OUT (withdrawals/expenses) for each account in the Historical summary table alongside money IN
+- [x] Wire Year Comparison tab to use the full 24-month getTwoYearData endpoint
+- [x] Backend: split Xero transactions by type — transferIn, transferOut, incomeReceived, billsPaid per account per month
+- [x] Frontend: update Historical Summary Table to show separate columns for Transfers In, Transfers Out, Income Received, Bills Paid per account
+- [x] Backend: split Xero transactions by type — transferIn, transferOut, incomeReceived, billsPaid per account per month
+- [x] Frontend: update Historical Summary Table to show separate columns for Transfers In, Transfers Out, Income Received, Bills Paid per account
+- [x] Backend: add getForecast procedure — use last 3-6 months of Xero data to compute averages and project 3 months forward per account
+- [x] Frontend: build 3-month Forecast sub-tab in XeroHistorical — show projected income, transfers, bills paid, closing balance per account with below-zero warnings
+- [x] Backend: include individual OpEx transaction line items (description, amount, date, type) per month in xeroRouter
+- [x] Frontend: add expandable OpEx line-by-line detail rows in Historical Summary Table
+- [x] Frontend: group OpEx line items by supplier name (summing amounts) in expanded rows
+- [x] Backend: return per-supplier OpEx averages in getForecast procedure
+- [x] Frontend: add supplier expense breakdown table to Forecast tab with avg/month per supplier
+- [x] Frontend: make each supplier's projected amount editable per month (overrideable)
+- [x] Frontend: wire supplier overrides to update OpEx bills paid totals, closing balances, and all downstream forecast calculations live
+- [x] Backend: return individual OpEx transaction line items (description, amount, date, type) per month
+- [x] Backend: calculate and return opening balance per account per month from Xero data
+- [x] Frontend: show opening balance row per account in Historical Summary Table
+- [x] Frontend: show expandable OpEx line-by-line expense rows in Historical Summary Table
