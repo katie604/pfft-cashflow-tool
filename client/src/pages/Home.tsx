@@ -137,7 +137,7 @@ export default function Home() {
         <header className="flex items-center justify-between px-6 py-4 bg-white border-b border-border shrink-0">
           <div className="flex items-center gap-3">
             <img
-              src={BRAND.logoSrc}
+              src={import.meta.env.BASE_URL + BRAND.logoSrc}
               alt={BRAND.productName}
               className="h-10 w-10 object-contain rounded-lg shrink-0"
             />

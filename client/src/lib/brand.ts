@@ -11,7 +11,7 @@ export interface Brand {
   productName: string;
   /** Sub-line under the product name */
   tagline: string;
-  /** Path under client/public */
+  /** Logo path under client/public (relative — base is applied at use site) */
   logoSrc: string;
   /** Primary brand colour (header, active tabs, totals) */
   navy: string;
@@ -23,7 +23,7 @@ export const PFFT_BRAND: Brand = {
   id: "pfft",
   productName: "Profit First Cashflow Tool",
   tagline: "2-year monthly projection · All data saved automatically",
-  logoSrc: "/brand/pfft-logo.png",
+  logoSrc: "brand/pfft-logo.png",
   navy: "#1D4E79",
   gold: "#F5B944",
 };
