@@ -21,8 +21,12 @@ npm run preview  # serve the built dist/
 
 ## Deploy
 
-GitHub → Vercel. Vite preset, build `npm run build`, output `dist/`
-(all set in `vercel.json`). Pushes to `main` auto-deploy.
+**Live:** https://katie604.github.io/pfft-cashflow-tool/
+
+GitHub Pages, served from `main` `/docs`. `npm run build` outputs straight to
+`docs/` (Vite `base: /pfft-cashflow-tool/` + `build.outDir`). Commit the rebuilt
+`docs/` and push to `main` — Pages rebuilds in ~1 min. `docs/.nojekyll` keeps
+the `assets/` folder intact. No Vercel, no build server, no secrets.
 
 ## Branding
 
