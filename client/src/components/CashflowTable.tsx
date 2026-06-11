@@ -101,7 +101,7 @@ export default function CashflowTable({
               </th>
 
               {/* Month columns */}
-              {Array.from({ length: 24 }, (_, i) => {
+              {Array.from({ length: results.length }, (_, i) => {
                 const isYear2Start = i === 12;
                 const label = getMonthLabel(settings.startMonth, settings.startYear, i);
                 const year = i < 12 ? "Year 1" : "Year 2";
@@ -172,7 +172,7 @@ export default function CashflowTable({
                         }
                         editValues={
                           isIncome
-                            ? settings.months.map((m) => m.incomeIn)
+                            ? settings.months.slice(0, results.length).map((m) => m.incomeIn)
                             : undefined
                         }
                       />
@@ -190,7 +190,7 @@ export default function CashflowTable({
                           onEdit={(monthIdx, val) =>
                             onUpdateWithdrawal(monthIdx, account.key, val)
                           }
-                          editValues={settings.months.map(
+                          editValues={settings.months.slice(0, results.length).map(
                             (m) => m.withdrawals[account.key] ?? 0
                           )}
                         />

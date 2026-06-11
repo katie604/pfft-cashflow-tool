@@ -108,6 +108,9 @@ export const ACCOUNT_CONFIGS: AccountConfig[] = [
   },
 ];
 
+/** Selectable forecast horizons (months). */
+export const HORIZON_OPTIONS = [1, 2, 3, 6, 12, 24] as const;
+
 export type AccountBalances = Record<AccountKey, number>;
 
 export interface MonthData {
@@ -124,6 +127,11 @@ export interface ProjectionSettings {
   allocations: AccountBalances;
   /** Monthly data for 24 months */
   months: MonthData[];
+  /**
+   * How many months of the projection to show (1, 2, 3, 6, 12 or 24).
+   * Data is always held for 24 months; this only controls the visible window.
+   */
+  horizonMonths: number;
   /** Start month (0 = Jan, 11 = Dec) */
   startMonth: number;
   /** Start year */
@@ -200,6 +208,7 @@ export function defaultSettings(): ProjectionSettings {
       opex: 30,
     },
     months: Array.from({ length: 24 }, defaultMonthData),
+    horizonMonths: 24,
     startMonth: now.getMonth(),
     startYear: now.getFullYear(),
     minBalances: {},

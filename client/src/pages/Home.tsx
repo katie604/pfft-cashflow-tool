@@ -3,15 +3,15 @@
 // Tabs: Cashflow Table | Account Graphs
 // ============================================================
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useCashflowStore } from "@/hooks/useCashflowStore";
 import SettingsPanel from "@/components/SettingsPanel";
 import SummaryBar from "@/components/SummaryBar";
 import CashflowTable from "@/components/CashflowTable";
 import AccountGraphs from "@/components/AccountGraphs";
-import { AccountKey, exportToCSV } from "@/lib/cashflow";
+import { AccountKey, exportToCSV, HORIZON_OPTIONS } from "@/lib/cashflow";
 import { BRAND } from "@/lib/brand";
-import { Download, Table2, BarChart2 } from "lucide-react";
+import { Download, Table2, BarChart2, Upload } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 
@@ -28,9 +28,16 @@ export default function Home() {
     setMinBalance,
     setBasLodgement,
     setProfitDistribution,
+    setHorizon,
+    importSettings,
   } = useCashflowStore();
 
   const [activeTab, setActiveTab] = useState<TabId>("table");
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Only show the chosen number of months; data is always held for 24.
+  const horizon = settings.horizonMonths ?? 24;
+  const viewResults = results.slice(0, horizon);
 
   // ── Table handlers ────────────────────────────────────────
 
@@ -89,7 +96,7 @@ export default function Home() {
   // ── Export ────────────────────────────────────────────────
 
   const handleExportCSV = () => {
-    const csv = exportToCSV(settings, results);
+    const csv = exportToCSV(settings, viewResults);
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -107,8 +114,56 @@ export default function Home() {
     }
   };
 
-  const year1Result = results[11] ?? null;
-  const year2Result = results[23] ?? null;
+  // ── Import live Xero (from the Cash Compass export JSON) ───
+
+  const handleImportClick = () => fileInputRef.current?.click();
+
+  const handleXeroFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-importing the same filename
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result as string);
+        const incoming = data?.settings ?? data; // accept {meta,settings} or bare
+        const ok =
+          incoming &&
+          incoming.openingBalances &&
+          incoming.allocations &&
+          Array.isArray(incoming.months);
+        if (!ok) {
+          toast.error("That file isn't a Cash Compass Xero export.");
+          return;
+        }
+        if (
+          !window.confirm(
+            "Load this Xero data? It replaces the current opening balances, " +
+              "percentages and monthly income."
+          )
+        ) {
+          return;
+        }
+        // Keep the user's current view horizon — an Xero import shouldn't
+        // silently snap the projection back to 24 months.
+        importSettings({ ...incoming, horizonMonths: horizon });
+        const meta = data?.meta;
+        if (meta) {
+          toast.success(
+            `Loaded ${meta.client ?? "Xero data"} — opening cash $${(
+              meta.startingCash ?? 0
+            ).toLocaleString("en-AU")}`
+          );
+          (meta.warnings ?? []).forEach((w: string) => toast.warning(w));
+        } else {
+          toast.success("Xero data imported");
+        }
+      } catch {
+        toast.error("Couldn't read that file.");
+      }
+    };
+    reader.readAsText(file);
+  };
 
   const TABS: { id: TabId; label: string; icon: React.ReactNode }[] = [
     { id: "table", label: "Cashflow Table", icon: <Table2 className="h-3.5 w-3.5" /> },
@@ -148,20 +203,34 @@ export default function Home() {
               <p className="text-xs text-muted-foreground">{BRAND.tagline}</p>
             </div>
           </div>
-          <Button variant="outline" size="sm" onClick={handleExportCSV} className="gap-2 text-sm">
-            <Download className="h-4 w-4" />
-            Export CSV
-          </Button>
+          <div className="flex items-center gap-2">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="application/json,.json"
+              onChange={handleXeroFile}
+              className="hidden"
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleImportClick}
+              className="gap-2 text-sm"
+            >
+              <Upload className="h-4 w-4" />
+              Import Xero
+            </Button>
+            <Button variant="outline" size="sm" onClick={handleExportCSV} className="gap-2 text-sm">
+              <Download className="h-4 w-4" />
+              Export CSV
+            </Button>
+          </div>
         </header>
 
         {/* ── Summary balance cards — always visible ── */}
-        <SummaryBar
-          latestResult={results[results.length - 1] ?? null}
-          year1Result={year1Result}
-          year2Result={year2Result}
-        />
+        <SummaryBar results={viewResults} horizonMonths={horizon} />
 
-        {/* ── Tab bar ── */}
+        {/* ── Tab bar + horizon selector ── */}
         <div className="flex items-center gap-0 px-6 bg-white border-b border-border shrink-0">
           {TABS.map((tab) => (
             <button
@@ -177,6 +246,27 @@ export default function Home() {
               {tab.label}
             </button>
           ))}
+
+          {/* Forecast horizon selector */}
+          <div className="ml-auto flex items-center gap-2 py-2">
+            <span className="text-xs text-muted-foreground hidden sm:inline">Show:</span>
+            <div className="inline-flex rounded-lg border border-border overflow-hidden">
+              {HORIZON_OPTIONS.map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setHorizon(m)}
+                  className={`px-2.5 py-1 text-xs font-medium transition-colors border-r border-border last:border-r-0 ${
+                    horizon === m
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-white text-muted-foreground hover:bg-muted"
+                  }`}
+                  title={`${m} month${m === 1 ? "" : "s"}`}
+                >
+                  {m === 12 ? "1yr" : m === 24 ? "2yr" : `${m}mo`}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
         {/* ── Tab content ── */}
@@ -184,14 +274,14 @@ export default function Home() {
           {activeTab === "table" && (
             <CashflowTable
               settings={settings}
-              results={results}
+              results={viewResults}
               onUpdateIncome={handleUpdateIncome}
               onUpdateWithdrawal={handleUpdateWithdrawal}
               onBulkIncomeSet={handleBulkIncomeSet}
             />
           )}
           {activeTab === "graphs" && (
-            <AccountGraphs settings={settings} results={results} />
+            <AccountGraphs settings={settings} results={viewResults} />
           )}
         </div>
       </div>

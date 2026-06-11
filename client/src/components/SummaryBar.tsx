@@ -7,14 +7,24 @@
 import { ACCOUNT_CONFIGS, MonthResult, formatCurrency, totalBalance } from "@/lib/cashflow";
 
 interface SummaryBarProps {
-  latestResult: MonthResult | null;
-  year1Result: MonthResult | null;
-  year2Result: MonthResult | null;
+  /** Results already sliced to the chosen horizon. */
+  results: MonthResult[];
+  horizonMonths: number;
 }
 
-export default function SummaryBar({ latestResult, year1Result, year2Result }: SummaryBarProps) {
-  const endOfYear1 = year1Result?.closingBalances;
-  const endOfYear2 = year2Result?.closingBalances;
+function horizonLabel(months: number): string {
+  if (months === 12) return "End of Year 1";
+  if (months === 24) return "End of Year 2";
+  return `End of ${months} month${months === 1 ? "" : "s"}`;
+}
+
+export default function SummaryBar({ results, horizonMonths }: SummaryBarProps) {
+  const finalResult = results[results.length - 1] ?? null;
+  const endBalances = finalResult?.closingBalances;
+
+  // Show a 12-month milestone too, only when looking out the full 2 years.
+  const milestone =
+    horizonMonths === 24 && results.length >= 12 ? results[11] : null;
 
   return (
     <div className="bg-white border-b border-border px-6 py-4">
@@ -23,19 +33,19 @@ export default function SummaryBar({ latestResult, year1Result, year2Result }: S
           Projected Closing Balances
         </h2>
         <div className="flex gap-6 text-xs text-muted-foreground">
-          {endOfYear1 && (
+          {milestone && (
             <span>
               End Year 1:{" "}
               <span className="font-semibold text-foreground">
-                {formatCurrency(totalBalance(endOfYear1))}
+                {formatCurrency(totalBalance(milestone.closingBalances))}
               </span>
             </span>
           )}
-          {endOfYear2 && (
+          {endBalances && (
             <span>
-              End Year 2:{" "}
+              {horizonLabel(horizonMonths)}:{" "}
               <span className="font-semibold text-foreground">
-                {formatCurrency(totalBalance(endOfYear2))}
+                {formatCurrency(totalBalance(endBalances))}
               </span>
             </span>
           )}
@@ -43,7 +53,7 @@ export default function SummaryBar({ latestResult, year1Result, year2Result }: S
       </div>
       <div className="grid grid-cols-7 gap-3">
         {ACCOUNT_CONFIGS.map((account) => {
-          const balance = endOfYear2?.[account.key] ?? 0;
+          const balance = endBalances?.[account.key] ?? 0;
           const isNeg = balance < 0;
           return (
             <div

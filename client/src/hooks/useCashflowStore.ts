@@ -36,6 +36,7 @@ function loadSettings(): ProjectionSettings {
       if (parsed.basLodgementDay === undefined) parsed.basLodgementDay = 28;
       if (!parsed.profitDistributionMonths) parsed.profitDistributionMonths = [0, 3, 6, 9];
       if (parsed.profitDistributionDay === undefined) parsed.profitDistributionDay = 1;
+      if (parsed.horizonMonths === undefined) parsed.horizonMonths = 24;
       return parsed;
     }
   } catch {
@@ -105,6 +106,26 @@ export function useCashflowStore() {
   }, []);
 
   /**
+   * Load a full settings object from an external source (the Cash Compass
+   * Xero export). Normalised the same way loadSettings does so a partial or
+   * older shape can't break the projection.
+   */
+  const importSettings = useCallback((incoming: ProjectionSettings) => {
+    const next: ProjectionSettings = { ...defaultSettings(), ...incoming };
+    while (next.months.length < 24) {
+      next.months.push({ incomeIn: 0, withdrawals: {} });
+    }
+    next.months = next.months.slice(0, 24).map((m) => ({
+      incomeIn: m.incomeIn ?? 0,
+      withdrawals: m.withdrawals ?? {},
+    }));
+    if (!next.minBalances) next.minBalances = {};
+    saveSettings(next);
+    setSettingsState(next);
+    setResults(calculateProjection(next));
+  }, []);
+
+  /**
    * When the Income opening balance is set, auto-distribute it across all
    * other accounts using PF percentages. Individual accounts can still be
    * manually overridden afterwards.
@@ -168,6 +189,13 @@ export function useCashflowStore() {
     [updateSettings]
   );
 
+  const setHorizon = useCallback(
+    (months: number) => {
+      updateSettings((prev) => ({ ...prev, horizonMonths: months }));
+    },
+    [updateSettings]
+  );
+
   return {
     settings,
     results,
@@ -178,5 +206,7 @@ export function useCashflowStore() {
     setMinBalance,
     setBasLodgement,
     setProfitDistribution,
+    setHorizon,
+    importSettings,
   };
 }
