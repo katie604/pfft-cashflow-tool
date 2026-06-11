@@ -1,0 +1,266 @@
+// ============================================================
+// Weekly what-if board — individual invoices & bills you can
+// drag between weeks to see the cash impact of getting paid
+// sooner / paying bills later.
+// ============================================================
+
+import { ACCOUNT_KEYS, AccountKey, AccountBalances } from "@/lib/cashflow";
+
+export interface WeeklyItem {
+  id: string;
+  type: "in" | "out"; // money in (invoice) | money out (bill)
+  name: string;
+  amount: number;
+  week: number; // 0-based from weekStart Monday
+  overdue?: boolean;
+  /** Original Xero due date (ISO yyyy-mm-dd), if known. */
+  dueDate?: string | null;
+  source: "xero" | "manual";
+}
+
+/** Whole days an item is past its due date (null if no due date). */
+export function daysOverdue(dueDate?: string | null): number | null {
+  if (!dueDate) return null;
+  const due = new Date(dueDate + "T00:00:00");
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return Math.floor((today.getTime() - due.getTime()) / 86400000);
+}
+
+export interface AccountWeekOut {
+  week: number;
+  account: string; // PF account key
+  amount: number;
+}
+
+/** A manual recurring weekly money-out line on an account (e.g. payroll). */
+export interface RecurringLine {
+  id: string;
+  account: string; // PF account key
+  label: string;
+  weeklyAmount: number;
+}
+
+/** Seeded payroll lines — owner's pay + team, ready to fill in. */
+export const DEFAULT_RECURRING: RecurringLine[] = [
+  { id: "own-net", account: "ownersPay", label: "Net wage", weeklyAmount: 0 },
+  { id: "own-payg", account: "ownersPay", label: "PAYG", weeklyAmount: 0 },
+  { id: "own-super", account: "ownersPay", label: "Super", weeklyAmount: 0 },
+  { id: "team-wage", account: "opex", label: "Team wages", weeklyAmount: 0 },
+  { id: "team-payg", account: "opex", label: "Team PAYG", weeklyAmount: 0 },
+  { id: "team-super", account: "opex", label: "Team Super", weeklyAmount: 0 },
+];
+
+export interface WeeklyData {
+  /** Cash in the bank at week 0 (transaction accounts, cards excluded). */
+  startingCash: number;
+  /** ISO date (Monday) of week 0. */
+  weekStart: string;
+  items: WeeklyItem[];
+  /** Categorised money-out per (week, PF account) — from bill account codes. */
+  outByAccount?: AccountWeekOut[];
+  /** Opening balance per PF account at week 0. */
+  openingByAccount?: Record<string, number>;
+  /** Manual recurring weekly money-out lines (payroll etc.). */
+  recurringLines?: RecurringLine[];
+  /** PF accounts the client hasn't opened yet (greyed + flagged in the table). */
+  accountsToOpen?: string[];
+  /**
+   * Assumed flat income per week (the 13-week equivalent of the monthly
+   * "set all income months"). When > 0 it drives the table's money-in instead
+   * of the real invoices — useful for clients who don't run Profit First yet.
+   * Affects the 13-week table only, not the What-If board.
+   */
+  incomeOverride?: number;
+}
+
+export interface WeekRow {
+  week: number;
+  weekCommencing: Date;
+  inItems: WeeklyItem[];
+  outItems: WeeklyItem[];
+  moneyIn: number;
+  moneyOut: number;
+  net: number;
+  opening: number;
+  closing: number;
+  /** Running total of all money in / out up to and including this week. */
+  cumulativeIn: number;
+  cumulativeOut: number;
+}
+
+function mondayOf(d: Date): Date {
+  const x = new Date(d);
+  const day = (x.getDay() + 6) % 7; // 0 = Monday
+  x.setDate(x.getDate() - day);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+
+export function thisMondayISO(): string {
+  return mondayOf(new Date()).toISOString().slice(0, 10);
+}
+
+export function emptyWeekly(): WeeklyData {
+  return { startingCash: 0, weekStart: thisMondayISO(), items: [] };
+}
+
+export function weekCommencing(weekStart: string, week: number): Date {
+  const d = new Date(weekStart + "T00:00:00");
+  d.setDate(d.getDate() + week * 7);
+  return d;
+}
+
+/** Build the running week-by-week ledger from the items.
+ *  incomeOverride > 0 replaces the invoice income with a flat weekly assumption
+ *  (used by the 13-week table; the board passes 0 to keep real invoices). */
+export function buildWeeks(
+  data: WeeklyData,
+  numWeeks: number,
+  incomeOverride = 0
+): WeekRow[] {
+  const rows: WeekRow[] = [];
+  let opening = data.startingCash;
+  let cumulativeIn = 0;
+  let cumulativeOut = 0;
+  for (let w = 0; w < numWeeks; w++) {
+    // Group same name together (supplier for out / client for in), then
+    // largest first within a name.
+    const byNameThenAmount = (a: WeeklyItem, b: WeeklyItem) =>
+      a.name.localeCompare(b.name) || b.amount - a.amount;
+    const inItems = data.items
+      .filter((i) => i.type === "in" && i.week === w)
+      .sort(byNameThenAmount);
+    const outItems = data.items
+      .filter((i) => i.type === "out" && i.week === w)
+      .sort(byNameThenAmount);
+    const moneyIn =
+      incomeOverride > 0 ? incomeOverride : inItems.reduce((s, i) => s + i.amount, 0);
+    const moneyOut = outItems.reduce((s, i) => s + i.amount, 0);
+    const net = moneyIn - moneyOut;
+    const closing = opening + net;
+    cumulativeIn += moneyIn;
+    cumulativeOut += moneyOut;
+    rows.push({
+      week: w,
+      weekCommencing: weekCommencing(data.weekStart, w),
+      inItems,
+      outItems,
+      moneyIn,
+      moneyOut,
+      net,
+      opening,
+      closing,
+      cumulativeIn,
+      cumulativeOut,
+    });
+    opening = closing;
+  }
+  return rows;
+}
+
+/** Lowest closing balance across the window (the danger point). */
+export function lowestPoint(rows: WeekRow[]): WeekRow | null {
+  if (!rows.length) return null;
+  return rows.reduce((lo, r) => (r.closing < lo.closing ? r : lo), rows[0]);
+}
+
+// ── Per-account weekly ledger ──
+
+/** Split gross income across PF accounts (same rules as the monthly engine). */
+function allocateIncome(gross: number, alloc: AccountBalances): AccountBalances {
+  const bas = gross * (alloc.bas / 100);
+  const materials = gross * (alloc.materials / 100);
+  const realRev = Math.max(0, gross - bas - materials);
+  const profit = realRev * (alloc.profit / 100);
+  const ownersPay = realRev * (alloc.ownersPay / 100);
+  const tax = realRev * (alloc.tax / 100);
+  const opex = realRev * (alloc.opex / 100);
+  const income = gross - (bas + materials + profit + ownersPay + tax + opex);
+  return { income, bas, materials, profit, ownersPay, tax, opex };
+}
+
+export interface AccountWeekRow {
+  week: number;
+  weekCommencing: Date;
+  opening: number;
+  moneyIn: number; // allocation in (Income: gross invoices)
+  moneyOut: number; // total out: bills + recurring + (Income) allocations swept
+  allocOut: number; // Income only: amount swept out to other accounts
+  bills: number; // categorised Xero bills out
+  recurring: number; // manual recurring lines out
+  net: number;
+  closing: number;
+}
+
+/**
+ * Per-account weekly ledger — full Profit First flow:
+ *   Income   IN = the week's invoice income (all of it), OUT = allocations swept
+ *            to the other accounts by the PF %.
+ *   Others   IN = their PF allocation, OUT = categorised bills + recurring lines.
+ */
+export function buildAccountWeeks(
+  data: WeeklyData,
+  numWeeks: number,
+  allocations: AccountBalances,
+  incomeOverride = 0,
+  recurringLines: RecurringLine[] = []
+): Record<AccountKey, AccountWeekRow[]> {
+  const outMap: Record<number, Partial<Record<string, number>>> = {};
+  for (const o of data.outByAccount ?? []) {
+    const wk = (outMap[o.week] ??= {});
+    wk[o.account] = (wk[o.account] ?? 0) + o.amount;
+  }
+  const recByAccount: Record<string, number> = {};
+  for (const r of recurringLines) {
+    recByAccount[r.account] = (recByAccount[r.account] ?? 0) + r.weeklyAmount;
+  }
+
+  const grossByWeek: Record<number, number> = {};
+  if (incomeOverride > 0) {
+    for (let w = 0; w < numWeeks; w++) grossByWeek[w] = incomeOverride;
+  } else {
+    for (const it of data.items) {
+      if (it.type === "in") grossByWeek[it.week] = (grossByWeek[it.week] ?? 0) + it.amount;
+    }
+  }
+
+  const running: Record<string, number> = {};
+  for (const k of ACCOUNT_KEYS) running[k] = data.openingByAccount?.[k] ?? 0;
+
+  const out = {} as Record<AccountKey, AccountWeekRow[]>;
+  for (const k of ACCOUNT_KEYS) out[k] = [];
+
+  for (let w = 0; w < numWeeks; w++) {
+    const gross = grossByWeek[w] ?? 0;
+    const alloc = allocateIncome(gross, allocations); // per-account inflow
+    // Total swept out of Income = everything allocated to the other accounts.
+    const allocOutTotal = ACCOUNT_KEYS.reduce(
+      (s, k) => (k === "income" ? s : s + alloc[k]),
+      0
+    );
+    for (const k of ACCOUNT_KEYS) {
+      const opening = running[k];
+      const moneyIn = k === "income" ? gross : alloc[k];
+      const bills = outMap[w]?.[k] ?? 0;
+      const recurring = recByAccount[k] ?? 0;
+      const allocOut = k === "income" ? allocOutTotal : 0;
+      const moneyOut = bills + recurring + allocOut;
+      const closing = opening + moneyIn - moneyOut;
+      out[k].push({
+        week: w,
+        weekCommencing: weekCommencing(data.weekStart, w),
+        opening,
+        moneyIn,
+        moneyOut,
+        allocOut,
+        bills,
+        recurring,
+        net: moneyIn - moneyOut,
+        closing,
+      });
+      running[k] = closing;
+    }
+  }
+  return out;
+}

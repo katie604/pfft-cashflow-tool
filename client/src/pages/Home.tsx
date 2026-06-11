@@ -5,17 +5,28 @@
 
 import { useCallback, useRef, useState } from "react";
 import { useCashflowStore } from "@/hooks/useCashflowStore";
+import { useWeeklyBoard } from "@/hooks/useWeeklyBoard";
 import SettingsPanel from "@/components/SettingsPanel";
 import SummaryBar from "@/components/SummaryBar";
 import CashflowTable from "@/components/CashflowTable";
 import AccountGraphs from "@/components/AccountGraphs";
+import WeeklyBoard from "@/components/WeeklyBoard";
+import WeeklyTable from "@/components/WeeklyTable";
+import ConnectXeroDialog from "@/components/ConnectXeroDialog";
 import { AccountKey, exportToCSV, HORIZON_OPTIONS } from "@/lib/cashflow";
 import { BRAND } from "@/lib/brand";
-import { Download, Table2, BarChart2, Upload } from "lucide-react";
+import { Download, Table2, BarChart2, Upload, CalendarRange, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 
-type TabId = "table" | "graphs";
+type TabId = "table" | "graphs" | "weekly";
+
+// Local Cash Compass API (python3 api_server.py). Override via ?api= or
+// localStorage for a cloud endpoint later.
+const CASH_COMPASS_API =
+  localStorage.getItem("cc-api-base") ||
+  new URLSearchParams(location.search).get("api") ||
+  "http://127.0.0.1:8765";
 
 export default function Home() {
   const {
@@ -32,8 +43,16 @@ export default function Home() {
     importSettings,
   } = useCashflowStore();
 
+  const weeklyBoard = useWeeklyBoard();
+
   const [activeTab, setActiveTab] = useState<TabId>("table");
+  const [tableView, setTableView] = useState<"monthly" | "weekly">("monthly");
+  const [connectOpen, setConnectOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // The monthly summary cards + month selector only apply to the monthly views.
+  const showMonthlyChrome =
+    activeTab === "graphs" || (activeTab === "table" && tableView === "monthly");
 
   // Only show the chosen number of months; data is always held for 24.
   const horizon = settings.horizonMonths ?? 24;
@@ -114,7 +133,51 @@ export default function Home() {
     }
   };
 
-  // ── Import live Xero (from the Cash Compass export JSON) ───
+  // ── Apply imported/pulled Cash Compass data (shared by file + live) ───
+
+  /* eslint-disable @typescript-eslint/no-explicit-any */
+  const applyImportedData = useCallback(
+    (data: any, opts?: { confirm?: boolean }): boolean => {
+      const incoming = data?.settings ?? data; // {meta,settings,weekly} or bare
+      const ok =
+        incoming &&
+        incoming.openingBalances &&
+        incoming.allocations &&
+        Array.isArray(incoming.months);
+      if (!ok) {
+        toast.error("That isn't Cash Compass data.");
+        return false;
+      }
+      if (
+        opts?.confirm &&
+        !window.confirm(
+          "Load this Xero data? It replaces the current opening balances, " +
+            "percentages and monthly income."
+        )
+      ) {
+        return false;
+      }
+      // Keep the user's current view horizon on import.
+      importSettings({ ...incoming, horizonMonths: horizon });
+      if (data?.weekly?.items) weeklyBoard.setWeekly(data.weekly);
+      const meta = data?.meta;
+      if (meta) {
+        toast.success(
+          `Loaded ${meta.client ?? "Xero data"} — opening cash $${(
+            meta.startingCash ?? 0
+          ).toLocaleString("en-AU")}`
+        );
+        (meta.warnings ?? []).forEach((w: string) => toast.warning(w));
+      } else {
+        toast.success("Xero data loaded");
+      }
+      return true;
+    },
+    [horizon, importSettings, weeklyBoard]
+  );
+  /* eslint-enable @typescript-eslint/no-explicit-any */
+
+  // ── Import from a file (fallback) ───
 
   const handleImportClick = () => fileInputRef.current?.click();
 
@@ -125,39 +188,7 @@ export default function Home() {
     const reader = new FileReader();
     reader.onload = () => {
       try {
-        const data = JSON.parse(reader.result as string);
-        const incoming = data?.settings ?? data; // accept {meta,settings} or bare
-        const ok =
-          incoming &&
-          incoming.openingBalances &&
-          incoming.allocations &&
-          Array.isArray(incoming.months);
-        if (!ok) {
-          toast.error("That file isn't a Cash Compass Xero export.");
-          return;
-        }
-        if (
-          !window.confirm(
-            "Load this Xero data? It replaces the current opening balances, " +
-              "percentages and monthly income."
-          )
-        ) {
-          return;
-        }
-        // Keep the user's current view horizon — an Xero import shouldn't
-        // silently snap the projection back to 24 months.
-        importSettings({ ...incoming, horizonMonths: horizon });
-        const meta = data?.meta;
-        if (meta) {
-          toast.success(
-            `Loaded ${meta.client ?? "Xero data"} — opening cash $${(
-              meta.startingCash ?? 0
-            ).toLocaleString("en-AU")}`
-          );
-          (meta.warnings ?? []).forEach((w: string) => toast.warning(w));
-        } else {
-          toast.success("Xero data imported");
-        }
+        applyImportedData(JSON.parse(reader.result as string), { confirm: true });
       } catch {
         toast.error("Couldn't read that file.");
       }
@@ -168,6 +199,7 @@ export default function Home() {
   const TABS: { id: TabId; label: string; icon: React.ReactNode }[] = [
     { id: "table", label: "Cashflow Table", icon: <Table2 className="h-3.5 w-3.5" /> },
     { id: "graphs", label: "Account Graphs", icon: <BarChart2 className="h-3.5 w-3.5" /> },
+    { id: "weekly", label: "Weekly What-If", icon: <CalendarRange className="h-3.5 w-3.5" /> },
   ];
 
   return (
@@ -212,13 +244,22 @@ export default function Home() {
               className="hidden"
             />
             <Button
+              size="sm"
+              onClick={() => setConnectOpen(true)}
+              className="gap-2 text-sm"
+            >
+              <Zap className="h-4 w-4" />
+              Connect Xero
+            </Button>
+            <Button
               variant="outline"
               size="sm"
               onClick={handleImportClick}
               className="gap-2 text-sm"
+              title="Load a Cash Compass export file"
             >
               <Upload className="h-4 w-4" />
-              Import Xero
+              From file
             </Button>
             <Button variant="outline" size="sm" onClick={handleExportCSV} className="gap-2 text-sm">
               <Download className="h-4 w-4" />
@@ -227,8 +268,18 @@ export default function Home() {
           </div>
         </header>
 
-        {/* ── Summary balance cards — always visible ── */}
-        <SummaryBar results={viewResults} horizonMonths={horizon} />
+        {connectOpen && (
+          <ConnectXeroDialog
+            apiBase={CASH_COMPASS_API}
+            onLoad={(data) => applyImportedData(data)}
+            onClose={() => setConnectOpen(false)}
+          />
+        )}
+
+        {/* ── Summary balance cards (monthly views only) ── */}
+        {showMonthlyChrome && (
+          <SummaryBar results={viewResults} horizonMonths={horizon} />
+        )}
 
         {/* ── Tab bar + horizon selector ── */}
         <div className="flex items-center gap-0 px-6 bg-white border-b border-border shrink-0">
@@ -247,7 +298,8 @@ export default function Home() {
             </button>
           ))}
 
-          {/* Forecast horizon selector */}
+          {/* Forecast horizon selector (monthly views only) */}
+          {showMonthlyChrome && (
           <div className="ml-auto flex items-center gap-2 py-2">
             <span className="text-xs text-muted-foreground hidden sm:inline">Show:</span>
             <div className="inline-flex rounded-lg border border-border overflow-hidden">
@@ -267,21 +319,67 @@ export default function Home() {
               ))}
             </div>
           </div>
+          )}
         </div>
 
         {/* ── Tab content ── */}
         <div className="flex-1 overflow-hidden">
           {activeTab === "table" && (
-            <CashflowTable
-              settings={settings}
-              results={viewResults}
-              onUpdateIncome={handleUpdateIncome}
-              onUpdateWithdrawal={handleUpdateWithdrawal}
-              onBulkIncomeSet={handleBulkIncomeSet}
-            />
+            <div className="flex flex-col h-full">
+              {/* Monthly ↔ weekly toggle */}
+              <div className="flex items-center gap-2 px-4 py-2 bg-white border-b border-border shrink-0">
+                <span className="text-xs text-muted-foreground">View:</span>
+                <div className="inline-flex rounded-lg border border-border overflow-hidden">
+                  {([
+                    ["monthly", "Monthly (Profit First)"],
+                    ["weekly", "Weekly (13-week)"],
+                  ] as const).map(([v, label]) => (
+                    <button
+                      key={v}
+                      onClick={() => setTableView(v)}
+                      className={`px-3 py-1 text-xs font-medium border-r border-border last:border-r-0 ${
+                        tableView === v
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-white text-muted-foreground hover:bg-muted"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="flex-1 min-h-0">
+                {tableView === "monthly" ? (
+                  <CashflowTable
+                    settings={settings}
+                    results={viewResults}
+                    onUpdateIncome={handleUpdateIncome}
+                    onUpdateWithdrawal={handleUpdateWithdrawal}
+                    onBulkIncomeSet={handleBulkIncomeSet}
+                  />
+                ) : (
+                  <WeeklyTable
+                    weekly={weeklyBoard.weekly}
+                    allocations={settings.allocations}
+                    onSetIncome={weeklyBoard.setIncomeOverride}
+                    onSetRecurring={weeklyBoard.setRecurringAmount}
+                  />
+                )}
+              </div>
+            </div>
           )}
           {activeTab === "graphs" && (
             <AccountGraphs settings={settings} results={viewResults} />
+          )}
+          {activeTab === "weekly" && (
+            <WeeklyBoard
+              weekly={weeklyBoard.weekly}
+              moveItem={weeklyBoard.moveItem}
+              addItem={weeklyBoard.addItem}
+              updateItem={weeklyBoard.updateItem}
+              deleteItem={weeklyBoard.deleteItem}
+              setStartingCash={weeklyBoard.setStartingCash}
+            />
           )}
         </div>
       </div>

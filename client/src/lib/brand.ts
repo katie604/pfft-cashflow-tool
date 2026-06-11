@@ -21,7 +21,7 @@ export interface Brand {
 
 export const PFFT_BRAND: Brand = {
   id: "pfft",
-  productName: "Profit First Cashflow Tool",
+  productName: "Katie's Cashflow Creation",
   tagline: "2-year monthly projection · All data saved automatically",
   logoSrc: "brand/pfft-logo.png",
   navy: "#1D4E79",
