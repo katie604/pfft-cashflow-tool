@@ -4,7 +4,7 @@
 // Design: "Profit First Dashboard"
 // ============================================================
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ACCOUNT_CONFIGS,
   AccountKey,
@@ -409,6 +409,11 @@ export default function SettingsPanel({
 
 function DistributeIncomeInput({ value, onDistribute }: { value: number; onDistribute: (v: number) => void }) {
   const [localValue, setLocalValue] = useState(value === 0 ? "" : formatCurrencyInput(value));
+  // Sync when the value changes from the outside (e.g. a fresh Xero pull),
+  // so the field doesn't keep showing a stale typed number.
+  useEffect(() => {
+    setLocalValue(value === 0 ? "" : formatCurrencyInput(value));
+  }, [value]);
   const handleBlur = () => {
     const parsed = parseCurrencyInput(localValue);
     onDistribute(parsed);
@@ -506,6 +511,8 @@ function MinBalanceRow({ account, value, onChange }: { account: (typeof ACCOUNT_
 
 function AllocationRow({ account, value, onChange }: { account: (typeof ACCOUNT_CONFIGS)[0]; value: number; onChange: (v: number) => void }) {
   const [localValue, setLocalValue] = useState(value.toString());
+  // Refresh when the % changes from a fresh Xero pull.
+  useEffect(() => setLocalValue(value.toString()), [value]);
   const handleBlur = () => {
     const parsed = parseFloat(localValue);
     const clamped = isNaN(parsed) ? 0 : Math.max(0, Math.min(100, parsed));
