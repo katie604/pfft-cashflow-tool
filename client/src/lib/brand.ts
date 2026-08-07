@@ -28,5 +28,16 @@ export const PFFT_BRAND: Brand = {
   gold: "#F5B944",
 };
 
+// Neutral house skin - ETB blue, no gold. Katie's call 2026-08-07: every
+// calculator wears one colour so they read as one family of internal tools.
+export const NEUTRAL_BRAND: Brand = {
+  id: "etb",
+  productName: "Katie's Cashflow Creation",
+  tagline: "2-year monthly projection \u00b7 All data saved automatically",
+  logoSrc: "brand/pfft-logo.png",
+  navy: "#1F3D6E",
+  gold: "#2c5290",
+};
+
 // Active brand for this deployment.
-export const BRAND: Brand = PFFT_BRAND;
+export const BRAND: Brand = NEUTRAL_BRAND;

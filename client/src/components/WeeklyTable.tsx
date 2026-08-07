@@ -25,7 +25,7 @@ import { parseCurrencyInput, formatCurrencyInput } from "@/lib/cashflow";
 
 const IN = "#2d7a4f";
 const OUT = "#b04040";
-const NAVY = "#14233D";
+const NAVY = "#1F3D6E";
 const GREY = "#9ca3af"; // accounts the client hasn't opened yet
 
 interface Props {

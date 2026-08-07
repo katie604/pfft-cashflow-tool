@@ -53,46 +53,46 @@
 :root {
   --radius: 0.5rem;
 
-  /* Warm neutral palette */
-  --background: oklch(0.985 0.005 80);
-  --foreground: oklch(0.15 0.01 60);
+  /* Cool blue-grey neutral palette (ETB skin) */
+  --background: oklch(0.985 0.006 250);
+  --foreground: oklch(0.15 0.012 250);
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.15 0.01 60);
+  --card-foreground: oklch(0.15 0.012 250);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.15 0.01 60);
+  --popover-foreground: oklch(0.15 0.012 250);
 
-  /* Primary = PFFT brand navy (from logo) */
-  --primary: #1D4E79;
+  /* Primary = ETB blue (house neutral skin) */
+  --primary: #1F3D6E;
   --primary-foreground: #ffffff;
-  /* Accent = PFFT brand gold (from logo) */
-  --brand-gold: #F5B944;
+  /* Accent = ETB blue-soft. No gold in this skin. */
+  --brand-gold: #2c5290;
 
-  --secondary: oklch(0.95 0.005 80);
-  --secondary-foreground: oklch(0.3 0.01 60);
-  --muted: oklch(0.95 0.005 80);
-  --muted-foreground: oklch(0.55 0.01 60);
-  --accent: oklch(0.93 0.01 80);
-  --accent-foreground: oklch(0.2 0.01 60);
+  --secondary: oklch(0.95 0.006 250);
+  --secondary-foreground: oklch(0.3 0.012 250);
+  --muted: oklch(0.95 0.006 250);
+  --muted-foreground: oklch(0.55 0.012 250);
+  --accent: oklch(0.93 0.01 250);
+  --accent-foreground: oklch(0.2 0.012 250);
   --destructive: oklch(0.577 0.245 27.325);
   --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(0.88 0.008 80);
-  --input: oklch(0.88 0.008 80);
-  --ring: #1D4E79;
+  --border: oklch(0.88 0.008 250);
+  --input: oklch(0.88 0.008 250);
+  --ring: #1F3D6E;
 
-  --chart-1: #1D4E79;
+  --chart-1: #1F3D6E;
   --chart-2: oklch(0.72 0.15 85);
   --chart-3: oklch(0.55 0.12 240);
   --chart-4: oklch(0.65 0.14 50);
   --chart-5: oklch(0.52 0.14 195);
 
-  --sidebar: oklch(0.18 0.01 60);
-  --sidebar-foreground: oklch(0.92 0.005 80);
-  --sidebar-primary: #1D4E79;
+  --sidebar: oklch(0.18 0.012 250);
+  --sidebar-foreground: oklch(0.92 0.006 250);
+  --sidebar-primary: #1F3D6E;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: oklch(0.25 0.01 60);
-  --sidebar-accent-foreground: oklch(0.92 0.005 80);
+  --sidebar-accent: oklch(0.25 0.012 250);
+  --sidebar-accent-foreground: oklch(0.92 0.006 250);
   --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: #1D4E79;
+  --sidebar-ring: #1F3D6E;
 
   /* Profit First account accent colours */
   --account-income: oklch(0.42 0.12 155);        /* Forest Green */
@@ -182,9 +182,9 @@
   }
 
   .cf-table .year-divider {
-    background: oklch(0.95 0.005 80);
-    border-left: 2px solid oklch(0.88 0.008 80);
-    border-right: 2px solid oklch(0.88 0.008 80);
+    background: oklch(0.95 0.006 250);
+    border-left: 2px solid oklch(0.88 0.008 250);
+    border-right: 2px solid oklch(0.88 0.008 250);
   }
 
   /* Account row colour accents */

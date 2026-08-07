@@ -122,7 +122,7 @@ export default function WeeklyBoard({
                 }`}
                 style={
                   view === v
-                    ? { backgroundColor: v === "in" ? IN : v === "out" ? OUT : "#14233D" }
+                    ? { backgroundColor: v === "in" ? IN : v === "out" ? OUT : "#1F3D6E" }
                     : {}
                 }
               >
@@ -269,7 +269,7 @@ export default function WeeklyBoard({
                     </div>
                     <div className="flex justify-between font-bold pt-0.5 border-t border-border/60">
                       <span>Balance</span>
-                      <span style={{ color: row.closing < 0 ? OUT : "#14233D" }}>
+                      <span style={{ color: row.closing < 0 ? OUT : "#1F3D6E" }}>
                         {formatCurrency(row.closing)}
                       </span>
                     </div>
