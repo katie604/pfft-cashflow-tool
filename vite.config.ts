@@ -19,6 +19,12 @@ export default defineConfig({
     emptyOutDir: true,
   },
   server: {
-    host: true,
+    // 127.0.0.1, never `true`. `host: true` binds to ALL interfaces, so anyone on
+    // the same WiFi can open this dev server - and it renders client financial data.
+    // AI Her Way, 5 Rules for Secure MCP Connections, Rule 5: "Run on localhost only
+    // (127.0.0.1), never on 0.0.0.0". Changed 11 Sep 2026; `host: true` was a scaffold
+    // default from the initial commit, not a deliberate choice.
+    // Need it on another device? Use a VPN for that session - do not make this permanent.
+    host: "127.0.0.1",
   },
 });
