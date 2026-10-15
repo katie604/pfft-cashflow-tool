@@ -5,12 +5,13 @@
 // & bills (per-account money-out categorised from Xero).
 // ============================================================
 
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import {
   WeeklyData,
   WeekRow,
   AccountWeekRow,
   RecurringLine,
+  ActualTransfer,
   buildWeeks,
   buildAccountWeeks,
 } from "@/lib/weekly";
@@ -35,6 +36,31 @@ interface Props {
   onSetRecurring: (id: string, amount: number) => void;
 }
 
+/** The Allocation Calculator's actual transfers for the business on screen.
+ *  Re-read when the calculator (same page, an iframe) saves new ones. */
+function useActualTransfers(): ActualTransfer[] {
+  const read = (): ActualTransfer[] => {
+    try {
+      const all = JSON.parse(localStorage.getItem("kcc-actual-transfers") || "[]") as ActualTransfer[];
+      const t = localStorage.getItem("kcc-tenant") || localStorage.getItem("pfft-pf-alloc-xero-tenant") || "";
+      return all.filter((a) => !t || !a.tenant || a.tenant === t);
+    } catch {
+      return [];
+    }
+  };
+  const [list, setList] = useState<ActualTransfer[]>(read);
+  useEffect(() => {
+    const refresh = () => setList(read());
+    window.addEventListener("storage", refresh);
+    window.addEventListener("focus", refresh);
+    return () => {
+      window.removeEventListener("storage", refresh);
+      window.removeEventListener("focus", refresh);
+    };
+  }, []);
+  return list;
+}
+
 function cell(v: number) {
   return v === 0 ? "–" : formatCurrency(v);
 }
@@ -55,12 +81,14 @@ export default function WeeklyTable({
   const recurringLines = weekly.recurringLines ?? [];
   const toOpen = new Set(weekly.accountsToOpen ?? []);
   const rows = buildWeeks(weekly, numWeeks, override);
+  const actuals = useActualTransfers();
   const accountRows = buildAccountWeeks(
     weekly,
     numWeeks,
     allocations,
     override,
-    recurringLines
+    recurringLines,
+    actuals
   );
   const hasItems = weekly.items.length > 0 || override > 0;
 
@@ -273,9 +301,10 @@ export default function WeeklyTable({
                           rows={ar}
                           pick={(r) => r.moneyIn}
                           rowType="allocation"
+                          compare={!isIncome}
                         />
                         {isIncome && ar.some((r) => r.allocOut > 0) && (
-                          <DetailRow account={acct} label="Allocated out" rows={ar} pick={(r) => r.allocOut} rowType="withdrawal" />
+                          <DetailRow account={acct} label="Allocated out" rows={ar} pick={(r) => r.allocOut} rowType="withdrawal" compare />
                         )}
                         {ar.some((r) => r.bills > 0) && (
                           <DetailRow account={acct} label="Bills (Xero)" rows={ar} pick={(r) => r.bills} rowType="withdrawal" />
@@ -342,6 +371,7 @@ function DetailRow({
   pick,
   rowType,
   isBold,
+  compare,
 }: {
   account: (typeof ACCOUNT_CONFIGS)[number];
   label: string;
@@ -349,7 +379,10 @@ function DetailRow({
   pick: (r: AccountWeekRow) => number;
   rowType: RowType;
   isBold?: boolean;
+  /** Colour actual weeks green (more than expected) or red (less), click for detail. */
+  compare?: boolean;
 }) {
+  const [open, setOpen] = useState<number | null>(null);
   const bgMap: Record<RowType, string> = {
     opening: "bg-muted/20",
     allocation: "bg-white",
@@ -381,6 +414,35 @@ function DetailRow({
             : rowType === "closing"
             ? account.colorHex
             : "inherit";
+        if (compare && r.actual) {
+          const exp = r.expected ?? 0;
+          const diff = Math.round((val - exp) * 100) / 100;
+          const good = diff >= 0; // more came in than expected = green; less = red
+          return (
+            <td
+              key={r.week}
+              className="px-2 py-2 text-right border-b border-border/50 cursor-pointer relative font-semibold"
+              style={{ color: "#fff", background: good ? IN : OUT }}
+              title="Actual transfer - click to compare with what was expected"
+              onClick={() => setOpen(open === r.week ? null : r.week)}
+            >
+              {cell(val)}
+              {open === r.week && (
+                <div
+                  className="absolute right-0 top-full z-20 mt-1 w-56 rounded-md border border-border bg-white p-2 text-left text-xs font-normal shadow-lg"
+                  style={{ color: "#22303b" }}
+                >
+                  <div className="font-semibold mb-1">Actual transfer</div>
+                  <div>Expected: {formatCurrencyInput(exp) ? "$" + formatCurrencyInput(exp) : "$0"}</div>
+                  <div>Actual: ${formatCurrencyInput(val) || "0"}</div>
+                  <div className="font-semibold" style={{ color: good ? IN : OUT }}>
+                    {good ? "Over" : "Under"} by ${formatCurrencyInput(Math.abs(diff)) || "0"}
+                  </div>
+                </div>
+              )}
+            </td>
+          );
+        }
         return (
           <td
             key={r.week}

@@ -3,7 +3,7 @@
 // Tabs: Cashflow Table | Account Graphs
 // ============================================================
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useCashflowStore } from "@/hooks/useCashflowStore";
 import { useWeeklyBoard } from "@/hooks/useWeeklyBoard";
 import SettingsPanel from "@/components/SettingsPanel";
@@ -46,7 +46,8 @@ export default function Home() {
   const weeklyBoard = useWeeklyBoard();
 
   const [activeTab, setActiveTab] = useState<TabId>("table");
-  const [tableView, setTableView] = useState<"monthly" | "weekly">("monthly");
+  // Always opens on the 13-week weekly view (Katie, 16 Oct 2026).
+  const [tableView, setTableView] = useState<"monthly" | "weekly">("weekly");
   const [connectOpen, setConnectOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -105,6 +106,60 @@ export default function Home() {
     [updateSettings]
   );
 
+  // ── Profit First Assessment percentages ───────────────────
+  // Katie, 16 Oct 2026: the percentages her last Profit First Assessment sent
+  // (Approve and send) sit in the % panels here, so they are easy to see. Same
+  // store the Allocation Calculator reads; they stay until a new assessment
+  // sends new ones. BAS is not part of the assessment, so it is left alone.
+  const [pfNote, setPfNote] = useState("");
+  const loadAssessmentPcts = useCallback(() => {
+    let tenant = "";
+    try {
+      tenant =
+        localStorage.getItem("kcc-tenant") ||
+        localStorage.getItem("pfft-pf-alloc-xero-tenant") ||
+        "";
+    } catch {
+      /* ignore */
+    }
+    if (!tenant) return;
+    fetch(`http://127.0.0.1:8766/api/store?tenant=${encodeURIComponent(tenant)}`)
+      .then((r) => r.json())
+      .then((d) => {
+        const p = d?.pcts;
+        if (!p) {
+          setPfNote("No Profit First Assessment percentages sent for this business yet.");
+          return;
+        }
+        const map: [string, AccountKey][] = [
+          ["matsubs", "materials"],
+          ["profit", "profit"],
+          ["ownerspay", "ownersPay"],
+          ["tax", "tax"],
+          ["opex", "opex"],
+        ];
+        updateSettings((prev) => {
+          const allocations = { ...prev.allocations };
+          map.forEach(([from, to]) => {
+            if (p[from] !== undefined && p[from] !== null && p[from] !== "")
+              allocations[to] = Number(p[from]);
+          });
+          return { ...prev, allocations };
+        });
+        const when = p.updated_at
+          ? new Date(p.updated_at).toLocaleDateString("en-AU", {
+              day: "numeric",
+              month: "long",
+              year: "numeric",
+              timeZone: "Australia/Sydney",
+            })
+          : "";
+        setPfNote(`From the Profit First Assessment${when ? `, sent ${when}` : ""}.`);
+      })
+      .catch(() => setPfNote("Could not reach the assessment store - percentages not loaded."));
+  }, [updateSettings]);
+  useEffect(loadAssessmentPcts, [loadAssessmentPcts]);
+
   const handleUpdateStartDate = useCallback(
     (month: number, year: number) => {
       updateSettings((prev) => ({ ...prev, startMonth: month, startYear: year }));
@@ -160,6 +215,7 @@ export default function Home() {
       // Keep the user's current view horizon on import.
       importSettings({ ...incoming, horizonMonths: horizon });
       if (data?.weekly?.items) weeklyBoard.setWeekly(data.weekly);
+      loadAssessmentPcts(); // an import replaces the % - put the assessment's back
       const meta = data?.meta;
       if (meta) {
         toast.success(
@@ -173,7 +229,7 @@ export default function Home() {
       }
       return true;
     },
-    [horizon, importSettings, weeklyBoard]
+    [horizon, importSettings, weeklyBoard, loadAssessmentPcts]
   );
   /* eslint-enable @typescript-eslint/no-explicit-any */
 
@@ -210,6 +266,7 @@ export default function Home() {
         onUpdateOpeningBalance={setAccountOpeningBalance}
         onDistributeIncomeOpening={setIncomeOpeningAndDistribute}
         onUpdateAllocation={handleUpdateAllocation}
+        pfNote={pfNote}
         onUpdateStartDate={handleUpdateStartDate}
         onUpdateMinBalance={setMinBalance}
         onUpdateBasLodgement={setBasLodgement}

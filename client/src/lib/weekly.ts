@@ -180,6 +180,23 @@ function allocateIncome(gross: number, alloc: AccountBalances): AccountBalances 
   return { income, bas, materials, profit, ownersPay, tax, opex };
 }
 
+/** Transfers actually made out of Income, saved by the Allocation Calculator's
+ *  "transfers completed" button (Katie, 16 Oct 2026). Keyed by PF account. */
+export interface ActualTransfer {
+  date: string; // yyyy-mm-dd, Sydney
+  tenant: string;
+  income: number;
+  transfers: Partial<Record<AccountKey, number>>;
+}
+
+/** Which week of the window an ISO date falls in (-1 if outside it). */
+export function weekIndexOf(weekStart: string, iso: string, numWeeks: number): number {
+  const a = new Date(weekStart + "T00:00:00").getTime();
+  const b = new Date(iso + "T00:00:00").getTime();
+  const w = Math.floor((b - a) / (7 * 86400000));
+  return w >= 0 && w < numWeeks ? w : -1;
+}
+
 export interface AccountWeekRow {
   week: number;
   weekCommencing: Date;
@@ -191,6 +208,10 @@ export interface AccountWeekRow {
   recurring: number; // manual recurring lines out
   net: number;
   closing: number;
+  /** True when this week's allocation is the ACTUAL transfer, not the forecast. */
+  actual?: boolean;
+  /** What the forecast said would come in (or, for Income, be swept out). */
+  expected?: number;
 }
 
 /**
@@ -204,8 +225,18 @@ export function buildAccountWeeks(
   numWeeks: number,
   allocations: AccountBalances,
   incomeOverride = 0,
-  recurringLines: RecurringLine[] = []
+  recurringLines: RecurringLine[] = [],
+  actuals: ActualTransfer[] = []
 ): Record<AccountKey, AccountWeekRow[]> {
+  // Actual transfers per week; the week's real dollars REPLACE its forecast
+  // allocation (Katie, 16 Oct 2026). Two in one week add together.
+  const actualByWeek: Record<number, Partial<Record<string, number>>> = {};
+  for (const a of actuals) {
+    const w = weekIndexOf(data.weekStart, a.date, numWeeks);
+    if (w < 0) continue;
+    const wk = (actualByWeek[w] ??= {});
+    for (const [k, v] of Object.entries(a.transfers)) wk[k] = (wk[k] ?? 0) + Number(v || 0);
+  }
   const outMap: Record<number, Partial<Record<string, number>>> = {};
   for (const o of data.outByAccount ?? []) {
     const wk = (outMap[o.week] ??= {});
@@ -233,15 +264,16 @@ export function buildAccountWeeks(
 
   for (let w = 0; w < numWeeks; w++) {
     const gross = grossByWeek[w] ?? 0;
-    const alloc = allocateIncome(gross, allocations); // per-account inflow
+    const alloc = allocateIncome(gross, allocations); // per-account inflow (forecast)
+    const act = actualByWeek[w];
+    const sumOut = (src: Partial<Record<string, number>>) =>
+      ACCOUNT_KEYS.reduce((s, k) => (k === "income" ? s : s + (src[k] ?? 0)), 0);
+    const expectedOut = sumOut(alloc);
     // Total swept out of Income = everything allocated to the other accounts.
-    const allocOutTotal = ACCOUNT_KEYS.reduce(
-      (s, k) => (k === "income" ? s : s + alloc[k]),
-      0
-    );
+    const allocOutTotal = act ? sumOut(act) : expectedOut;
     for (const k of ACCOUNT_KEYS) {
       const opening = running[k];
-      const moneyIn = k === "income" ? gross : alloc[k];
+      const moneyIn = k === "income" ? gross : act ? act[k] ?? 0 : alloc[k];
       const bills = outMap[w]?.[k] ?? 0;
       const recurring = recByAccount[k] ?? 0;
       const allocOut = k === "income" ? allocOutTotal : 0;
@@ -258,6 +290,8 @@ export function buildAccountWeeks(
         recurring,
         net: moneyIn - moneyOut,
         closing,
+        actual: !!act,
+        expected: k === "income" ? expectedOut : alloc[k],
       });
       running[k] = closing;
     }

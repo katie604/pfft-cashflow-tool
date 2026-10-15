@@ -56,6 +56,13 @@ export default function ConnectXeroDialog({ apiBase, onLoad, onClose }: Props) {
           setPulling(false);
           return;
         }
+        // Remember which business this is, so its Profit First Assessment
+        // percentages can be loaded into the panel (Katie, 16 Oct 2026).
+        try {
+          localStorage.setItem("kcc-tenant", selected);
+        } catch {
+          /* ignore */
+        }
         onLoad(data);
         onClose();
       })

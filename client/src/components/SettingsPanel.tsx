@@ -38,6 +38,8 @@ interface SettingsPanelProps {
   onUpdateBasLodgement: (months: number[], day: number) => void;
   onUpdateProfitDistribution: (months: number[], day: number) => void;
   onReset: () => void;
+  /** Where the percentages came from (the Profit First Assessment), if loaded. */
+  pfNote?: string;
 }
 
 export default function SettingsPanel({
@@ -50,6 +52,7 @@ export default function SettingsPanel({
   onUpdateBasLodgement,
   onUpdateProfitDistribution,
   onReset,
+  pfNote,
 }: SettingsPanelProps) {
   const [collapsed, setCollapsed] = useState(false);
 
@@ -171,32 +174,14 @@ export default function SettingsPanel({
 
             <Separator className="bg-sidebar-border" />
 
-            {/* ── Opening Balances ── */}
+            {/* ── Bank Account Balances (Katie, 16 Oct 2026: income auto-distribute removed) ── */}
             <section>
               <h3 className="text-xs font-semibold uppercase tracking-widest text-sidebar-foreground/50 mb-1">
-                Opening Balances
+                Opening Bank Account Balances
               </h3>
               <p className="text-xs text-sidebar-foreground/40 mb-3 leading-relaxed">
-                Enter the <span className="text-amber-400 font-medium">Income</span> balance to auto-distribute across all accounts using your PF percentages. Or set each account manually.
+                Double-check these against your bank account.
               </p>
-
-              {/* Income row — triggers auto-distribute */}
-              <div className="mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
-                <div className="flex items-center gap-2 mb-2">
-                  <div className="h-2.5 w-2.5 rounded-full shrink-0" style={{ backgroundColor: "#2d7a4f" }} />
-                  <span className="text-xs font-semibold text-sidebar-foreground/90">Income (Gross)</span>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Zap className="h-3 w-3 text-amber-400 ml-auto shrink-0" />
-                    </TooltipTrigger>
-                    <TooltipContent side="right" className="max-w-48">
-                      <p>Entering this amount will auto-calculate and fill all account balances using your PF percentages.</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </div>
-                <DistributeIncomeInput value={settings.openingBalances.income} onDistribute={onDistributeIncomeOpening} />
-                <p className="text-[10px] text-amber-400/80 mt-1.5">⚡ Auto-distributes to all accounts below</p>
-              </div>
 
               {/* All other accounts — manual override */}
               <div className="space-y-2.5">
@@ -219,6 +204,9 @@ export default function SettingsPanel({
                 % of Gross Income
               </h3>
               <p className="text-xs text-sidebar-foreground/40 mb-3">Swept directly from gross income first.</p>
+              {pfNote && (
+                <p className="text-xs font-semibold text-sidebar-foreground/80 mb-3">{pfNote}</p>
+              )}
               <div className="space-y-2.5 mb-5">
                 {grossAccounts.map((account) => (
                   <AllocationRow key={account.key} account={account} value={settings.allocations[account.key]} onChange={(v) => onUpdateAllocation(account.key, v)} />
