@@ -268,6 +268,9 @@ export interface AccountWeekRow {
   recurring: number; // manual recurring lines out
   transfersIn: number; // recurring lines moved IN from another account (PAYG, super)
   fee?: number; // Income only: payment fee taken off before the split (Stripe)
+  /** OpEx only: the Ignition fee, paid from OpEx (Katie, 16 Oct 2026: in Profit First
+   *  terms it is an operating expense, so it does not shrink everyone's share). */
+  opexFee?: number;
   net: number;
   closing: number;
   /** This week, started from the bank balance now with only what is still to go. */
@@ -327,7 +330,9 @@ export function buildAccountWeeks(
   /** BAS payments to the ATO, paid out of the BAS account on their due date. */
   basPayments: BasPayment[] = [],
   /** What-if expenses (Weekly What-If only - the cash flow table passes none). */
-  whatIfOut: WeeklyItem[] = []
+  whatIfOut: WeeklyItem[] = [],
+  /** % of income taken at source that is paid FROM OpEx (EBS: the Ignition fee). */
+  opexFeePct = 0
 ): Record<AccountKey, AccountWeekRow[]> {
   const whatIfMap: Record<number, Record<string, number>> = {};
   for (const it of whatIfOut) {
@@ -389,6 +394,9 @@ export function buildAccountWeeks(
     // split. Not on an actual week - that payout already had the fee taken.
     const fee = act ? 0 : Math.round(gross * (feePct / 100) * 100) / 100;
     const alloc = allocateAfterFee(gross, fee, allocations); // per-account inflow (forecast)
+    // The Ignition fee leaves Income at source too, but it is OpEx's cost: OpEx gets its
+    // full share and pays the fee. Not on an actual week - the real transfers already did.
+    const opexFee = act ? 0 : Math.round(gross * (opexFeePct / 100) * 100) / 100;
     const sumOut = (src: Partial<Record<string, number>>) =>
       ACCOUNT_KEYS.reduce((s, k) => (k === "income" ? s : s + (src[k] ?? 0)), 0);
     const expectedOut = sumOut(alloc);
@@ -437,7 +445,8 @@ export function buildAccountWeeks(
       const recurring = recByAccount[k] ?? 0;
       const allocOut = k === "income" ? allocOutTotal : 0;
       const feeOut = k === "income" ? fee : 0;
-      const moneyOut = bills + recurring + allocOut + feeOut + paidAto;
+      const opexFeeOut = k === "opex" ? opexFee : 0;
+      const moneyOut = bills + recurring + allocOut + feeOut + paidAto + opexFeeOut;
       // Round to the cent so a fully swept week shows $0, not "($0)" from float dust.
       const transfersIn = recInByAccount[k] ?? 0;
       const closing = Math.round((opening + moneyIn + transfersIn - moneyOut) * 100) / 100;
@@ -455,6 +464,7 @@ export function buildAccountWeeks(
         closing,
         actual: !!act,
         fee: feeOut,
+        opexFee: opexFeeOut,
         basPaid: paidAto - whatIf,
         whatIf,
         expected: k === "income" ? expectedOut : alloc[k],

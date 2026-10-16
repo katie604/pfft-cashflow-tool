@@ -59,7 +59,7 @@ interface AccountGraphsProps {
 export default function AccountGraphs({ settings, weekly }: AccountGraphsProps) {
   const [period, setPeriod] = useState<Period>("fortnightly"); // Katie, 16 Oct 2026
   const [basPayments] = useBasPayments();
-  const [estimates, , feePct, nowBal] = useIncomeEstimates();
+  const [estimates, , feePct, nowBal, , opexFeePct] = useIncomeEstimates();
   const actuals = useActualTransfers();
   const bills = useMonthlyBills();
   const recurring = weekly.recurringLines ?? [];
@@ -80,7 +80,7 @@ export default function AccountGraphs({ settings, weekly }: AccountGraphsProps) 
 
   const acct = buildAccountWeeks(
     weekly, GRAPH_WEEKS, settings.allocations, weekly.incomeOverride ?? 0,
-    recurring, actuals, est, feePct, nowBal, basPayments
+    recurring, actuals, est, feePct, nowBal, basPayments, [], opexFeePct
   );
   const wise = buildWiseWeeks(weekly, GRAPH_WEEKS, recurring, bills, nowBal);
   const { groupOf, labels } = groupWeeks(weekly.weekStart, GRAPH_WEEKS, period);

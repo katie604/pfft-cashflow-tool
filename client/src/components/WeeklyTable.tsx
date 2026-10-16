@@ -104,6 +104,8 @@ function IncomeInRow({
 export interface IncomeFee {
   label: string;
   pct: number;
+  /** "opex" = paid from OpEx, not taken off before the split (the Ignition fee). */
+  from?: string;
 }
 
 /** Katie's per-week income estimates, from the helper's file. */
@@ -113,6 +115,7 @@ export function useIncomeEstimates(): [
   number,
   NowBalances | null,
   IncomeFee[],
+  number,
 ] {
   const [est, setEst] = useState<Record<string, number>>({});
   const [feePct, setFeePct] = useState(0);
@@ -132,8 +135,14 @@ export function useIncomeEstimates(): [
       .then((r) => r.json())
       .then((d) => {
         setEst(d?.income ?? {});
-        setFeePct(Number(d?.feePct ?? 0));
-        setFees((d?.fees ?? []) as IncomeFee[]);
+        const list = (d?.fees ?? []) as IncomeFee[];
+        setFees(list);
+        // Before the split = every fee not paid from OpEx (EBS: the Stripe fee).
+        setFeePct(
+          list.length
+            ? Math.round(list.filter((f) => f.from !== "opex").reduce((t, f) => t + f.pct, 0) * 100) / 100
+            : Number(d?.feePct ?? 0)
+        );
         setNowBal((d?.now ?? null) as NowBalances | null);
       })
       .catch(() => {
@@ -157,7 +166,8 @@ export function useIncomeEstimates(): [
         /* helper not running */
       });
   };
-  return [est, save, feePct, nowBal, fees];
+  const opexFeePct = Math.round(fees.filter((f) => f.from === "opex").reduce((t, f) => t + f.pct, 0) * 100) / 100;
+  return [est, save, feePct, nowBal, fees.filter((f) => f.from !== "opex"), opexFeePct];
 }
 
 /** The Team heading: a dropdown showing the weekly team total, click to open. */
@@ -460,7 +470,7 @@ export default function WeeklyTable({
 
   const override = weekly.incomeOverride ?? 0;
   const recurringLines = weekly.recurringLines ?? [];
-  const [realEstimates, setEstimate, feePct, nowBal, incomeFees] = useIncomeEstimates();
+  const [realEstimates, setEstimate, feePct, nowBal, incomeFees, opexFeePct] = useIncomeEstimates();
   // On the What-If, the week's income = the play weekly figure (or the real
   // estimate, or the invoices) plus any one-off income added there.
   let estimates = realEstimates;
@@ -503,9 +513,12 @@ export default function WeeklyTable({
     feePct,
     nowBal,
     basPayments,
-    whatIfItems
+    whatIfItems,
+    opexFeePct
   );
   const share = shareOfIncome(allocations, feePct);
+  // OpEx also pays the Ignition fee on any extra income, so it keeps less of each $1.
+  share.opex = (share.opex ?? 0) - opexFeePct / 100;
   const hasItems = weekly.items.length > 0 || override > 0;
   // Katie, 16 Oct 2026: balances and running totals all calculate off the accounts
   // (and Wise). Money in = new income; money out = what actually leaves the
@@ -831,6 +844,15 @@ export default function WeeklyTable({
                                 ))}
                             </Fragment>
                           ))}
+                        {account.key === "opex" && ar.some((r) => (r.opexFee ?? 0) > 0) && (
+                          <DetailRow
+                            account={acct}
+                            label={`Ignition fee (${opexFeePct}%, from OpEx)`}
+                            rows={ar}
+                            pick={(r) => r.opexFee ?? 0}
+                            rowType="withdrawal"
+                          />
+                        )}
                         {ar.some((r) => r.bills > 0) && (
                           <DetailRow account={acct} label="Bills (Xero)" rows={ar} pick={(r) => r.bills} rowType="withdrawal" />
                         )}
