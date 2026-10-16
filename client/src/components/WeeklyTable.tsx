@@ -116,6 +116,7 @@ export function useIncomeEstimates(): [
   NowBalances | null,
   IncomeFee[],
   number,
+  IncomeFee[],
 ] {
   const [est, setEst] = useState<Record<string, number>>({});
   const [feePct, setFeePct] = useState(0);
@@ -167,7 +168,7 @@ export function useIncomeEstimates(): [
       });
   };
   const opexFeePct = Math.round(fees.filter((f) => f.from === "opex").reduce((t, f) => t + f.pct, 0) * 100) / 100;
-  return [est, save, feePct, nowBal, fees.filter((f) => f.from !== "opex"), opexFeePct];
+  return [est, save, feePct, nowBal, fees.filter((f) => f.from !== "opex"), opexFeePct, fees.filter((f) => f.from === "opex")];
 }
 
 /** The Team heading: a dropdown showing the weekly team total, click to open. */
@@ -470,7 +471,7 @@ export default function WeeklyTable({
 
   const override = weekly.incomeOverride ?? 0;
   const recurringLines = weekly.recurringLines ?? [];
-  const [realEstimates, setEstimate, feePct, nowBal, incomeFees, opexFeePct] = useIncomeEstimates();
+  const [realEstimates, setEstimate, feePct, nowBal, incomeFees, opexFeePct, opexFees] = useIncomeEstimates();
   // On the What-If, the week's income = the play weekly figure (or the real
   // estimate, or the invoices) plus any one-off income added there.
   let estimates = realEstimates;
@@ -844,15 +845,27 @@ export default function WeeklyTable({
                                 ))}
                             </Fragment>
                           ))}
-                        {account.key === "opex" && ar.some((r) => (r.opexFee ?? 0) > 0) && (
-                          <DetailRow
-                            account={acct}
-                            label={`Ignition fee (${opexFeePct}%, from OpEx)`}
-                            rows={ar}
-                            pick={(r) => r.opexFee ?? 0}
-                            rowType="withdrawal"
-                          />
-                        )}
+                        {/* Katie, 16 Oct 2026: the Stripe fee and the Ignition fee are both paid from
+                            OpEx. One row each; the last takes the cents left so they add up exactly. */}
+                        {account.key === "opex" && ar.some((r) => (r.opexFee ?? 0) > 0) &&
+                          opexFees.map((f, i) => (
+                            <DetailRow
+                              key={"opexfee-" + f.label}
+                              account={acct}
+                              label={`${f.label} (${f.pct}%, from OpEx)`}
+                              rows={ar}
+                              pick={(r) => {
+                                const total = r.opexFee ?? 0;
+                                if (!total) return 0;
+                                const gross = accountRows.income[r.week]?.moneyIn ?? 0;
+                                const part = (x: IncomeFee) => Math.round(gross * x.pct) / 100;
+                                if (i < opexFees.length - 1) return part(f);
+                                const before = opexFees.slice(0, -1).reduce((t, x) => t + part(x), 0);
+                                return Math.round((total - before) * 100) / 100;
+                              }}
+                              rowType="withdrawal"
+                            />
+                          ))}
                         {ar.some((r) => r.bills > 0) && (
                           <DetailRow account={acct} label="Bills (Xero)" rows={ar} pick={(r) => r.bills} rowType="withdrawal" />
                         )}
