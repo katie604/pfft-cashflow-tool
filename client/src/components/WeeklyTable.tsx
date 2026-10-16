@@ -5,7 +5,7 @@
 // & bills (per-account money-out categorised from Xero).
 // ============================================================
 
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, createContext, useContext, useEffect, useRef, useState } from "react";
 import {
   WeeklyData,
   WeekRow,
@@ -16,9 +16,14 @@ import {
   WiseWeekRow,
   buildWiseWeeks,
   isoLocal,
+  weekCommencing,
   NowBalances,
+  BasPayment,
   buildWeeks,
   buildAccountWeeks,
+  WeeklyItem,
+  shareOfIncome,
+  incomeNeeded,
 } from "@/lib/weekly";
 import {
   formatCurrency,
@@ -28,6 +33,7 @@ import {
   AccountBalances,
 } from "@/lib/cashflow";
 import { ChevronDown, ChevronUp } from "lucide-react";
+import { useBasPayments } from "@/hooks/useBasPayments";
 import { parseCurrencyInput, formatCurrencyInput } from "@/lib/cashflow";
 
 const IN = "#2d7a4f";
@@ -40,7 +46,23 @@ interface Props {
   allocations: AccountBalances;
   onSetIncome: (amount: number) => void;
   onSetRecurring: (id: string, amount: number) => void;
+  /** Weekly What-If (Katie, 16 Oct 2026): this same table, with play percentages,
+   *  expenses you add, and how much more income stops an account going red. */
+  whatIf?: {
+    addItem: (item: Omit<WeeklyItem, "id" | "source">) => void;
+    deleteItem: (id: string) => void;
+  };
 }
+
+/** True on the What-If: the real entries (income estimates, wages, BAS) show but
+ *  cannot be changed there, so a play never writes to the real files. */
+const ReadOnlyCtx = createContext(false);
+
+/** The accounts the Profit First % split Real Revenue between - must total 100%. */
+const REAL_REV_KEYS: AccountKey[] = ["profit", "ownersPay", "tax", "opex"];
+const SHORT: Partial<Record<AccountKey, string>> = {
+  bas: "BAS", materials: "Materials", profit: "Profit", ownersPay: "Owner's Pay", tax: "Tax", opex: "OpEx",
+};
 
 /** Income in - type an estimate into any week that has no actual yet
  *  (Katie, 16 Oct 2026). Saved per business, by the week's Monday. */
@@ -78,7 +100,7 @@ function IncomeInRow({
 }
 
 /** Katie's per-week income estimates, from the helper's file. */
-function useIncomeEstimates(): [
+export function useIncomeEstimates(): [
   Record<string, number>,
   (weekIso: string, amount: number) => void,
   number,
@@ -252,7 +274,7 @@ function WiseBlock({
 }
 
 /** This business's regular monthly bills, from the helper's file. */
-function useMonthlyBills(): MonthlyBill[] {
+export function useMonthlyBills(): MonthlyBill[] {
   const [bills, setBills] = useState<MonthlyBill[]>([]);
   useEffect(() => {
     let t = "";
@@ -275,7 +297,7 @@ function useMonthlyBills(): MonthlyBill[] {
 /** The actual transfers for the business on screen, from the file the helper keeps
  *  (~/.config/cash-compass/actual_transfers.json) so the dev page and the double-click
  *  file agree. Re-read when the Allocation Calculator saves new ones, and on focus. */
-function useActualTransfers(): ActualTransfer[] {
+export function useActualTransfers(): ActualTransfer[] {
   const [list, setList] = useState<ActualTransfer[]>([]);
   useEffect(() => {
     const refresh = () => {
@@ -303,16 +325,115 @@ function useActualTransfers(): ActualTransfer[] {
   return list;
 }
 
+/** BAS due dates and amounts - Katie types both (16 Oct 2026). Saved per business. */
+function BasDueEditor({
+  numWeeks,
+  color,
+  payments,
+  onSave,
+}: {
+  numWeeks: number;
+  color: string;
+  payments: BasPayment[];
+  onSave: (next: BasPayment[]) => void;
+}) {
+  // Katie, 16 Oct 2026: an amount typed and then Enter / a tab switch never saved,
+  // because it only saved when the box lost focus. Now it saves as you type.
+  const latest = useRef(payments);
+  latest.current = payments;
+  const timers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const setOne = (id: string, patch: Partial<BasPayment>) =>
+    onSave(latest.current.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+  const soon = (id: string, patch: Partial<BasPayment>) => {
+    clearTimeout(timers.current[id]);
+    timers.current[id] = setTimeout(() => setOne(id, patch), 500);
+  };
+  const enterSaves = (e: React.KeyboardEvent<HTMLInputElement>) =>
+    e.key === "Enter" && (e.target as HTMLInputElement).blur();
+  return (
+    <tr className="bg-white">
+      <td colSpan={numWeeks + 1} className="px-4 py-2 border-b border-border/50" style={{ borderLeft: `3px solid ${color}60` }}>
+        <div className="pl-5 text-[11px] text-muted-foreground mb-1.5">
+          BAS due dates and amounts - type the amount once you know it
+        </div>
+        <div className="pl-5 flex flex-wrap gap-3">
+          {payments.map((p) => (
+            <div key={p.id} className="bas-due flex items-center gap-1.5 text-xs border border-border rounded-md px-2 py-1">
+              {p.label && <span className="font-medium" style={{ color }}>{p.label}</span>}
+              <input
+                type="date"
+                defaultValue={p.due}
+                onChange={(e) => e.target.value && e.target.value !== p.due && soon(p.id + "-due", { due: e.target.value })}
+                onBlur={(e) => e.target.value && e.target.value !== p.due && setOne(p.id, { due: e.target.value })}
+                onKeyDown={enterSaves}
+                className="h-6 text-xs border border-border rounded px-1"
+              />
+              <span className="text-muted-foreground">$</span>
+              <input
+                type="text"
+                inputMode="decimal"
+                placeholder="amount"
+                defaultValue={p.amount ? formatCurrencyInput(p.amount) : ""}
+                onChange={(e) => {
+                  const v = Math.round(parseCurrencyInput(e.target.value) * 100) / 100;
+                  if (v >= 0) soon(p.id, { amount: v });
+                }}
+                onBlur={(e) => {
+                  const v = Math.round(parseCurrencyInput(e.target.value) * 100) / 100;
+                  clearTimeout(timers.current[p.id]);
+                  if (v >= 0 && v !== p.amount) setOne(p.id, { amount: v });
+                }}
+                onKeyDown={enterSaves}
+                className="h-6 w-24 text-xs text-right border border-border rounded px-1"
+              />
+              <button
+                onClick={() => onSave(payments.filter((x) => x.id !== p.id))}
+                className="text-muted-foreground hover:text-red-600 px-0.5"
+                title="Remove this BAS payment"
+              >
+                ×
+              </button>
+            </div>
+          ))}
+          <button
+            onClick={() => {
+              const d = new Date();
+              onSave([...payments, { id: `bas-${Date.now()}`, label: "", due: isoLocal(d), amount: 0 }]);
+            }}
+            className="text-xs text-primary hover:underline"
+          >
+            + add a BAS payment
+          </button>
+        </div>
+      </td>
+    </tr>
+  );
+}
+
 function cell(v: number) {
   return v === 0 ? "–" : formatCurrency(v);
 }
 
 export default function WeeklyTable({
   weekly,
-  allocations,
+  allocations: realAllocations,
   onSetIncome,
   onSetRecurring,
+  whatIf,
 }: Props) {
+  const isWhatIf = !!whatIf;
+  // What-If percentages: start from the real ones, never saved anywhere.
+  const [playAlloc, setPlayAlloc] = useState<AccountBalances | null>(null);
+  const allocations = isWhatIf && playAlloc ? playAlloc : realAllocations;
+  const whatIfItems = isWhatIf
+    ? weekly.items.filter((it) => it.type === "out" && it.source === "manual" && !!it.account)
+    : [];
+  // What-If income (Katie, 16 Oct 2026): an increase on top of every week from
+  // week 1 ("what if we increase income by 500 from now on"), and one-offs.
+  const [playWeekly, setPlayWeekly] = useState<number | null>(null);
+  const whatIfIncome = isWhatIf
+    ? weekly.items.filter((it) => it.type === "in" && it.source === "manual" && it.account === "income")
+    : [];
   const [numWeeks, setNumWeeks] = useState(13);
   const [mode, setMode] = useState<"accounts" | "total">("accounts");
   const [expanded, setExpanded] = useState<Set<AccountKey>>(
@@ -321,7 +442,23 @@ export default function WeeklyTable({
 
   const override = weekly.incomeOverride ?? 0;
   const recurringLines = weekly.recurringLines ?? [];
-  const [estimates, setEstimate, feePct, nowBal] = useIncomeEstimates();
+  const [realEstimates, setEstimate, feePct, nowBal] = useIncomeEstimates();
+  // On the What-If, the week's income = the play weekly figure (or the real
+  // estimate, or the invoices) plus any one-off income added there.
+  let estimates = realEstimates;
+  if (isWhatIf && (playWeekly !== null || whatIfIncome.length)) {
+    estimates = { ...realEstimates };
+    for (let w = 0; w < numWeeks; w++) {
+      const iso = isoLocal(weekCommencing(weekly.weekStart, w));
+      const invoices = weekly.items
+        .filter((it) => it.type === "in" && !it.account && it.week === w)
+        .reduce((t, it) => t + it.amount, 0);
+      const base =
+        (realEstimates[iso] ?? (override > 0 ? override : invoices)) + (playWeekly !== null && w >= 1 ? playWeekly : 0);
+      const extra = whatIfIncome.filter((it) => it.week === w).reduce((t, it) => t + it.amount, 0);
+      estimates[iso] = Math.round((base + extra) * 100) / 100;
+    }
+  }
   const toOpen = new Set([...(weekly.accountsToOpen ?? []), ...(nowBal?.toOpen ?? [])]);
   const rows = buildWeeks(weekly, numWeeks, override);
   const actuals = useActualTransfers();
@@ -333,6 +470,7 @@ export default function WeeklyTable({
     return { [w0.week]: rem[lineId] !== undefined ? Number(rem[lineId]) : null } as Record<number, number | null>;
   };
   const monthlyBills = useMonthlyBills();
+  const [basPayments, saveBasPayments] = useBasPayments();
   const wiseRows = buildWiseWeeks(weekly, numWeeks, recurringLines, monthlyBills, nowBal);
   const [wiseOpen, setWiseOpen] = useState(true);
   const [teamOpen, setTeamOpen] = useState(false); // Team is a dropdown (Katie, 16 Oct 2026)
@@ -345,8 +483,11 @@ export default function WeeklyTable({
     actuals,
     estimates,
     feePct,
-    nowBal
+    nowBal,
+    basPayments,
+    whatIfItems
   );
+  const share = shareOfIncome(allocations, feePct);
   const hasItems = weekly.items.length > 0 || override > 0;
   // Katie, 16 Oct 2026: balances and running totals all calculate off the accounts
   // (and Wise). Money in = new income; money out = what actually leaves the
@@ -377,12 +518,36 @@ export default function WeeklyTable({
   const expandAll = () => setExpanded(new Set(ACCOUNT_CONFIGS.map((a) => a.key)));
   const collapseAll = () => setExpanded(new Set());
 
+  const realRevTotal = Math.round(REAL_REV_KEYS.reduce((t, k) => t + Number(allocations[k] || 0), 0) * 100) / 100;
+
   return (
+    <ReadOnlyCtx.Provider value={isWhatIf}>
     <div className="flex flex-col h-full bg-background">
+      {isWhatIf && (
+        <WhatIfBar
+          allocations={allocations}
+          realAllocations={realAllocations}
+          changed={!!playAlloc || playWeekly !== null}
+          playWeekly={playWeekly}
+          onSetWeekly={setPlayWeekly}
+          total={realRevTotal}
+          onSet={(k, v) => setPlayAlloc({ ...allocations, [k]: v })}
+          onReset={() => {
+            setPlayAlloc(null);
+            setPlayWeekly(null);
+          }}
+          numWeeks={numWeeks}
+          weekLabel={(w) => (w === 0 ? "This week" : `Wk ${w} - ` + rows[w]?.weekCommencing.toLocaleDateString("en-AU", { day: "numeric", month: "short" }))}
+          onAdd={(name, amount, week, account) => {
+            whatIf!.addItem({ type: account === "income" ? "in" : "out", name, amount, week, account });
+            setExpanded((prev) => new Set(prev).add(account as AccountKey));
+          }}
+        />
+      )}
       {/* Control bar */}
       <div className="flex items-center gap-4 px-4 py-2.5 bg-white border-b border-border flex-wrap shrink-0">
         <span className="text-sm font-semibold" style={{ color: NAVY }}>
-          {numWeeks}-Week Cash Flow
+          {numWeeks}-Week {isWhatIf ? "What-If" : "Cash Flow"}
         </span>
         <span className="text-xs text-muted-foreground">
           Cash now: <strong>{formatCurrency(weekly.startingCash)}</strong>
@@ -421,7 +586,7 @@ export default function WeeklyTable({
           </div>
         )}
 
-        <div className="flex items-center gap-2">
+        {!isWhatIf && <div className="flex items-center gap-2">
           <span className="text-xs text-muted-foreground">Set all weeks income:</span>
           <BulkIncomeInput value={override} onSet={onSetIncome} />
           {override > 0 && (
@@ -433,7 +598,7 @@ export default function WeeklyTable({
               use invoices
             </button>
           )}
-        </div>
+        </div>}
 
         <div className="ml-auto flex items-center gap-2">
           <span className="text-xs text-muted-foreground hidden sm:inline">Weeks:</span>
@@ -552,6 +717,14 @@ export default function WeeklyTable({
                             ? "Closing balance"
                             : `${allocations[account.key]}% of income`}
                         </div>
+                        {isWhatIf && !isIncome && !isToOpen && ar.some((r) => r.closing < 0) && (() => {
+                          const n = incomeNeeded(ar, share[account.key] ?? 0);
+                          return (
+                            <div className="wi-need text-[11px] font-semibold mt-0.5 pl-5" style={{ color: OUT }}>
+                              {n === null ? "more income won't fix this" : n > 0 ? `needs ${formatCurrency(n)} more income a week` : "red this week only"}
+                            </div>
+                          );
+                        })()}
                       </td>
                       {ar.map((r) => {
                         const val = r.closing;
@@ -573,6 +746,9 @@ export default function WeeklyTable({
                         {isIncome ? (
                           <>
                             <IncomeInRow account={acct} rows={ar} onSet={setEstimate} />
+                            {whatIfIncome.map((it) => (
+                              <WhatIfRow key={it.id} account={acct} item={it} numWeeks={numWeeks} onDelete={() => whatIf!.deleteItem(it.id)} />
+                            ))}
                             {ar.some((r) => (r.fee ?? 0) > 0) && (
                               <DetailRow
                                 account={acct}
@@ -619,6 +795,14 @@ export default function WeeklyTable({
                         {ar.some((r) => r.bills > 0) && (
                           <DetailRow account={acct} label="Bills (Xero)" rows={ar} pick={(r) => r.bills} rowType="withdrawal" />
                         )}
+                        {account.key === "bas" && (
+                          <>
+                            <DetailRow account={acct} label="Paid to ATO (BAS)" rows={ar} pick={(r) => r.basPaid ?? 0} rowType="withdrawal" />
+                            {!isWhatIf && (
+                              <BasDueEditor numWeeks={numWeeks} color={acct.colorHex} payments={basPayments} onSave={saveBasPayments} />
+                            )}
+                          </>
+                        )}
                         {/* Katie, 16 Oct 2026: team wages, PAYG and super under their own heading. */}
                         {recurringLines.some((l) => l.account === account.key && l.id.startsWith("team-")) && (
                           <TeamHeaderRow
@@ -656,6 +840,11 @@ export default function WeeklyTable({
                               onSet={onSetRecurring}
                               paid={paidWeeks(ar, account.key, line.id)}
                             />
+                          ))}
+                        {whatIfItems
+                          .filter((it) => it.account === account.key)
+                          .map((it) => (
+                            <WhatIfRow key={it.id} account={acct} item={it} numWeeks={numWeeks} onDelete={() => whatIf!.deleteItem(it.id)} />
                           ))}
                         <DetailRow account={acct} label="Net movement" rows={ar} pick={(r) => r.net} rowType="allocation" />
                         <DetailRow account={acct} label="Closing balance" rows={ar} pick={(r) => r.closing} rowType="closing" isBold />
@@ -705,6 +894,7 @@ export default function WeeklyTable({
         </div>
       )}
     </div>
+    </ReadOnlyCtx.Provider>
   );
 }
 
@@ -857,6 +1047,15 @@ function RecurringCell({
   color?: string;
 }) {
   const [editing, setEditing] = useState(false);
+  const readOnly = useContext(ReadOnlyCtx);
+  if (readOnly) {
+    return (
+      <td className="px-2 py-2 text-right border-b border-border/50" style={{ color: value ? color : undefined }}
+          title="Change this on the cash flow table">
+        {value ? formatCurrency(value) : "–"}
+      </td>
+    );
+  }
   if (editing) {
     return (
       <td className="px-1 py-1 border-b border-border/50">
@@ -950,6 +1149,176 @@ function TotalRow({
           </td>
         );
       })}
+    </tr>
+  );
+}
+
+
+// ── Weekly What-If pieces (Katie, 16 Oct 2026) ──
+
+/** Play percentages, Reset, and add an expense. Nothing here is saved. */
+function WhatIfBar({
+  allocations,
+  realAllocations,
+  changed,
+  playWeekly,
+  onSetWeekly,
+  total,
+  onSet,
+  onReset,
+  numWeeks,
+  weekLabel,
+  onAdd,
+}: {
+  allocations: AccountBalances;
+  realAllocations: AccountBalances;
+  changed: boolean;
+  playWeekly: number | null;
+  onSetWeekly: (v: number | null) => void;
+  total: number;
+  onSet: (k: AccountKey, v: number) => void;
+  onReset: () => void;
+  numWeeks: number;
+  weekLabel: (w: number) => string;
+  onAdd: (name: string, amount: number, week: number, account: string) => void;
+}) {
+  const [name, setName] = useState("");
+  const [amount, setAmount] = useState("");
+  const [week, setWeek] = useState(1);
+  const [account, setAccount] = useState<string>("opex");
+  const [kind, setKind] = useState<"out" | "in">("out");
+  const add = () => {
+    const amt = Math.round(parseCurrencyInput(amount) * 100) / 100;
+    if (!amt || amt < 0) return;
+    onAdd(name.trim() || (kind === "in" ? "Income" : "Expense"), amt, week, kind === "in" ? "income" : account);
+    setName("");
+    setAmount("");
+  };
+  const keys: AccountKey[] = ["bas", "materials", ...REAL_REV_KEYS];
+  return (
+    <div className="wi-bar px-4 py-2 bg-[#E9EEF6] border-b border-border text-xs space-y-2 shrink-0">
+      <div className="flex items-center gap-3 flex-wrap">
+        <span className="font-semibold" style={{ color: NAVY }}>Play with the %</span>
+        {keys.map((k) => {
+          const cfg = ACCOUNT_CONFIGS.find((a) => a.key === k)!;
+          const moved = Number(allocations[k]) !== Number(realAllocations[k]);
+          return (
+            <label key={k} className="flex items-center gap-1">
+              <span className="text-muted-foreground">{SHORT[k] ?? cfg.label}</span>
+              <input
+                key={`${k}-${realAllocations[k]}-${changed}`}
+                data-pct={k}
+                defaultValue={String(allocations[k])}
+                inputMode="decimal"
+                onBlur={(e) => {
+                  const v = parseFloat(e.target.value);
+                  if (!isNaN(v) && v >= 0 && v <= 100 && v !== Number(allocations[k])) onSet(k, v);
+                }}
+                onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
+                className="w-12 text-right bg-white border rounded px-1 py-0.5"
+                style={{ borderColor: moved ? NAVY : undefined, fontWeight: moved ? 700 : 400 }}
+              />
+              <span className="text-muted-foreground">%</span>
+            </label>
+          );
+        })}
+        <span className="wi-total font-semibold" style={{ color: Math.abs(total - 100) < 0.001 ? IN : OUT }}>
+          Profit + Owner's Pay + Tax + OpEx = {total}%{Math.abs(total - 100) < 0.001 ? "" : " - needs to be 100%"}
+        </span>
+        {/* Katie, 16 Oct 2026: a proper button so it is easy to see. Always there;
+            greyed until something has been changed. */}
+        <button
+          onClick={onReset}
+          disabled={!changed}
+          className="wi-reset px-3 py-1 rounded-md font-semibold text-white shadow-sm"
+          style={{ backgroundColor: changed ? NAVY : GREY, cursor: changed ? "pointer" : "default" }}
+          title={changed ? "Put back your real % and take off the income increase" : "Nothing changed yet"}
+        >
+          Reset to my real %
+        </button>
+        <span className="text-muted-foreground ml-auto">A play only - nothing here is saved or changes the cash flow table.</span>
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="font-semibold" style={{ color: NAVY }}>Increase income by</span>
+        <input
+          key={`wk-${playWeekly}`}
+          data-weekly
+          defaultValue={playWeekly !== null ? formatCurrencyInput(playWeekly) : ""}
+          placeholder="0.00"
+          inputMode="decimal"
+          onBlur={(e) => {
+            const raw = e.target.value.trim();
+            if (!raw) return onSetWeekly(null);
+            const v = Math.round(parseCurrencyInput(raw) * 100) / 100;
+            if (v >= 0) onSetWeekly(v);
+          }}
+          onKeyDown={(e) => e.key === "Enter" && (e.target as HTMLInputElement).blur()}
+          className="w-28 text-right bg-white border rounded px-1.5 py-0.5"
+          style={{ borderColor: playWeekly !== null ? NAVY : undefined, fontWeight: playWeekly !== null ? 700 : 400 }}
+        />
+        <span className="text-muted-foreground">a week from week 1, on top of your estimates (inc GST)</span>
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="font-semibold" style={{ color: NAVY }}>Add</span>
+        <div className="inline-flex rounded border border-border overflow-hidden">
+          {([["in", "Income"], ["out", "Expense"]] as const).map(([v, label]) => (
+            <button key={v} onClick={() => setKind(v)} data-kind={v}
+              className="px-2 py-0.5 border-r border-border last:border-r-0"
+              style={kind === v ? { backgroundColor: v === "in" ? IN : OUT, color: "#fff" } : { backgroundColor: "#fff" }}>
+              {label}
+            </button>
+          ))}
+        </div>
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="What is it"
+          className="w-40 bg-white border border-border rounded px-1.5 py-0.5" />
+        <input value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="Amount" inputMode="decimal"
+          onKeyDown={(e) => e.key === "Enter" && add()}
+          className="w-24 text-right bg-white border border-border rounded px-1.5 py-0.5" />
+        <select value={week} onChange={(e) => setWeek(Number(e.target.value))}
+          className="bg-white border border-border rounded px-1 py-0.5">
+          {Array.from({ length: numWeeks }, (_, w) => (
+            <option key={w} value={w}>{weekLabel(w)}</option>
+          ))}
+        </select>
+        {kind === "out" ? (
+          <select value={account} onChange={(e) => setAccount(e.target.value)}
+            className="bg-white border border-border rounded px-1 py-0.5">
+            {ACCOUNT_CONFIGS.filter((a) => a.key !== "income").map((a) => (
+              <option key={a.key} value={a.key}>Paid from {a.label}</option>
+            ))}
+          </select>
+        ) : (
+          <span className="text-muted-foreground">into Income, split by the %</span>
+        )}
+        <button onClick={add} className="wi-add px-2 py-0.5 rounded text-white" style={{ backgroundColor: NAVY }}>Add</button>
+      </div>
+    </div>
+  );
+}
+
+/** One what-if expense, in its week, under the account that pays it. */
+function WhatIfRow({
+  account,
+  item,
+  numWeeks,
+  onDelete,
+}: {
+  account: (typeof ACCOUNT_CONFIGS)[number];
+  item: WeeklyItem;
+  numWeeks: number;
+  onDelete: () => void;
+}) {
+  return (
+    <tr className="bg-white hover:bg-muted/40 transition-colors">
+      <td className="sticky-col px-4 py-2 border-b border-border/50 bg-white" style={{ borderLeftColor: account.colorHex + "60" }}>
+        <span className="text-xs pl-5 italic" style={{ color: item.type === "in" ? IN : OUT }}>What-if: {item.name}</span>
+        <button onClick={onDelete} className="ml-2 text-muted-foreground hover:text-red-600" title="Remove this expense">×</button>
+      </td>
+      {Array.from({ length: numWeeks }, (_, w) => (
+        <td key={w} className="px-2 py-2 text-right border-b border-border/50 text-xs" style={{ color: item.type === "in" ? IN : OUT }}>
+          {w === item.week ? formatCurrency(item.amount) : "–"}
+        </td>
+      ))}
     </tr>
   );
 }

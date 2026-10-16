@@ -30,6 +30,14 @@ import {
   ACCOUNT_KEYS,
 } from "@/lib/cashflow";
 import { AlertTriangle } from "lucide-react";
+import { useBasPayments } from "@/hooks/useBasPayments";
+import type { BasPayment } from "@/lib/weekly";
+
+/** "25 Nov" from "2026-11-25". */
+function dueText(due: string): string {
+  const [y, m, d] = due.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString("en-AU", { day: "numeric", month: "short" });
+}
 
 interface AccountGraphsProps {
   settings: ProjectionSettings;
@@ -37,6 +45,8 @@ interface AccountGraphsProps {
 }
 
 export default function AccountGraphs({ settings, results }: AccountGraphsProps) {
+  // Katie, 16 Oct 2026: the BAS markers come from the same due dates as the weekly table.
+  const [basPayments] = useBasPayments();
   return (
     <div className="overflow-auto h-full bg-background px-6 py-6 space-y-6">
       {/* All Accounts combined chart */}
@@ -49,6 +59,7 @@ export default function AccountGraphs({ settings, results }: AccountGraphsProps)
           accountKey={account.key}
           settings={settings}
           results={results}
+          basPayments={basPayments}
         />
       ))}
     </div>
@@ -169,10 +180,12 @@ function AccountChart({
   accountKey,
   settings,
   results,
+  basPayments = [],
 }: {
   accountKey: AccountKey;
   settings: ProjectionSettings;
   results: MonthResult[];
+  basPayments?: BasPayment[];
 }) {
   const account = ACCOUNT_CONFIGS.find((a) => a.key === accountKey)!;
   const minBalance = settings.minBalances?.[accountKey] ?? 0;
@@ -191,7 +204,14 @@ function AccountChart({
   // Build chart data
   const data = results.map((r, i) => {
     const actualMonth = (settings.startMonth + i) % 12;
-    const isBasDue = isBas && basLodgementMonths.includes(actualMonth);
+    // Katie's own BAS due dates win; the old month toggles only when there are none.
+    const md = new Date(settings.startYear, settings.startMonth + i, 1);
+    const basHits = basPayments.filter((p) => {
+      const [y, m] = p.due.split("-").map(Number);
+      return y === md.getFullYear() && m - 1 === md.getMonth();
+    });
+    const isBasDue = isBas && (basPayments.length ? basHits.length > 0 : basLodgementMonths.includes(actualMonth));
+    const basDueLabel = basHits.length ? `Due ${basHits.map((p) => dueText(p.due)).join(", ")}` : `Due ${basLodgementDay}th`;
     const isProfitDist = isProfit && profitDistributionMonths.includes(actualMonth);
     return {
       month: getMonthLabel(settings.startMonth, settings.startYear, i),
@@ -199,6 +219,7 @@ function AccountChart({
       outflow: r.withdrawals[accountKey],
       balance: r.closingBalances[accountKey],
       isBasDue,
+      basDueLabel,
       isProfitDist,
     };
   });
@@ -215,6 +236,9 @@ function AccountChart({
   const basMarkerLabels = data
     .filter((d) => d.isBasDue)
     .map((d) => d.month);
+  const basMarkerText: Record<string, string> = Object.fromEntries(
+    data.filter((d) => d.isBasDue).map((d) => [d.month, d.basDueLabel])
+  );
 
   // Profit distribution labels for reference lines
   const profitDistMarkerLabels = data
@@ -267,7 +291,9 @@ function AccountChart({
             <div className="flex items-center gap-1.5 bg-orange-50 border border-orange-200 rounded-lg px-2.5 py-1">
               <div className="h-2 w-2 rounded-full bg-orange-500" />
               <span className="text-xs font-semibold text-orange-600">
-                BAS due {basLodgementDay}th
+                {basPayments.length
+                  ? `BAS due ${basPayments.map((p) => dueText(p.due)).join(", ")}`
+                  : `BAS due ${basLodgementDay}th`}
               </span>
             </div>
           )}
@@ -316,7 +342,7 @@ function AccountChart({
                 stroke="#f97316"
                 strokeWidth={1.5}
                 strokeDasharray="3 2"
-                label={{ value: `Due ${basLodgementDay}th`, position: "insideTopLeft", fontSize: 8, fill: "#f97316" }}
+                label={{ value: basMarkerText[label], position: "insideTopLeft", fontSize: 8, fill: "#f97316" }}
               />
             ))}
 

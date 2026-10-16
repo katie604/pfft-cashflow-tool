@@ -16,6 +16,8 @@ export interface WeeklyItem {
   /** Original Xero due date (ISO yyyy-mm-dd), if known. */
   dueDate?: string | null;
   source: "xero" | "manual";
+  /** A what-if expense: the bank account it is paid from (Katie, 16 Oct 2026). */
+  account?: string;
 }
 
 /** Whole days an item is past its due date (null if no due date). */
@@ -274,6 +276,34 @@ export interface AccountWeekRow {
   actual?: boolean;
   /** What the forecast said would come in (or, for Income, be swept out). */
   expected?: number;
+  /** BAS account only: paid to the ATO this week (Katie, 16 Oct 2026). */
+  basPaid?: number;
+  /** What-if expenses added on the Weekly What-If, paid from this account. */
+  whatIf?: number;
+}
+
+/** A BAS payment to the ATO - the due date and the amount Katie types in
+ *  (Katie, 16 Oct 2026). Kept per business in ~/.config/cash-compass/bas_payments.json. */
+export interface BasPayment {
+  id: string;
+  label?: string;
+  due: string; // YYYY-MM-DD
+  amount: number;
+}
+
+/** BAS paid in the 7 days from wkStart. A due date already gone is not still to pay. */
+export function basInWeek(payments: BasPayment[], wkStart: Date): number {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const end = new Date(wkStart);
+  end.setDate(end.getDate() + 7);
+  let total = 0;
+  for (const p of payments) {
+    const [y, m, d] = p.due.split("-").map(Number);
+    const due = new Date(y, m - 1, d);
+    if (due >= wkStart && due < end && due >= today) total += Number(p.amount || 0);
+  }
+  return Math.round(total * 100) / 100;
 }
 
 /**
@@ -293,8 +323,18 @@ export function buildAccountWeeks(
   estimates: Record<string, number> = {},
   /** % of income a payment provider keeps before the split (EBS: Stripe 25%). */
   feePct = 0,
-  now: NowBalances | null = null
+  now: NowBalances | null = null,
+  /** BAS payments to the ATO, paid out of the BAS account on their due date. */
+  basPayments: BasPayment[] = [],
+  /** What-if expenses (Weekly What-If only - the cash flow table passes none). */
+  whatIfOut: WeeklyItem[] = []
 ): Record<AccountKey, AccountWeekRow[]> {
+  const whatIfMap: Record<number, Record<string, number>> = {};
+  for (const it of whatIfOut) {
+    if (it.type !== "out" || !it.account) continue;
+    const wk = (whatIfMap[it.week] ??= {});
+    wk[it.account] = (wk[it.account] ?? 0) + Number(it.amount || 0);
+  }
   // Actual transfers per week; the week's real dollars REPLACE its forecast
   // allocation (Katie, 16 Oct 2026). Two in one week add together.
   const actualByWeek: Record<number, Partial<Record<string, number>>> = {};
@@ -325,7 +365,8 @@ export function buildAccountWeeks(
     for (let w = 0; w < numWeeks; w++) grossByWeek[w] = incomeOverride;
   } else {
     for (const it of data.items) {
-      if (it.type === "in") grossByWeek[it.week] = (grossByWeek[it.week] ?? 0) + it.amount;
+      // What-if income (has an account) never counts on the real cash flow table.
+      if (it.type === "in" && !it.account) grossByWeek[it.week] = (grossByWeek[it.week] ?? 0) + it.amount;
     }
   }
 
@@ -354,10 +395,14 @@ export function buildAccountWeeks(
     // Total swept out of Income = everything allocated to the other accounts.
     const allocOutTotal = act ? sumOut(act) : expectedOut;
     const isNowWeek = !!now && now.week === isoLocal(weekCommencing(data.weekStart, w));
+    const basPaid = basInWeek(basPayments, weekCommencing(data.weekStart, w));
     for (const k of ACCOUNT_KEYS) {
+      const paidAto = (k === "bas" ? basPaid : 0) + (whatIfMap[w]?.[k] ?? 0);
+      const whatIf = whatIfMap[w]?.[k] ?? 0;
       if (isNowWeek && now!.balances[k] !== undefined) {
         const opening = now!.balances[k];
-        const togo = Object.values(now!.remaining[k] ?? {}).reduce((s2, v) => s2 + Number(v || 0), 0);
+        const togo =
+          Object.values(now!.remaining[k] ?? {}).reduce((s2, v) => s2 + Number(v || 0), 0) + paidAto;
         const closing = Math.round((opening - togo) * 100) / 100;
         out[k].push({
           week: w,
@@ -373,6 +418,8 @@ export function buildAccountWeeks(
           closing,
           stillToGo: true,
           fee: 0,
+          basPaid: paidAto - whatIf,
+          whatIf,
         });
         running[k] = closing;
         continue;
@@ -390,7 +437,7 @@ export function buildAccountWeeks(
       const recurring = recByAccount[k] ?? 0;
       const allocOut = k === "income" ? allocOutTotal : 0;
       const feeOut = k === "income" ? fee : 0;
-      const moneyOut = bills + recurring + allocOut + feeOut;
+      const moneyOut = bills + recurring + allocOut + feeOut + paidAto;
       // Round to the cent so a fully swept week shows $0, not "($0)" from float dust.
       const transfersIn = recInByAccount[k] ?? 0;
       const closing = Math.round((opening + moneyIn + transfersIn - moneyOut) * 100) / 100;
@@ -408,6 +455,8 @@ export function buildAccountWeeks(
         closing,
         actual: !!act,
         fee: feeOut,
+        basPaid: paidAto - whatIf,
+        whatIf,
         expected: k === "income" ? expectedOut : alloc[k],
       });
       running[k] = closing;
@@ -453,7 +502,9 @@ export function buildWiseWeeks(
   numWeeks: number,
   recurringLines: RecurringLine[],
   bills: MonthlyBill[],
-  now: NowBalances | null = null
+  now: NowBalances | null = null,
+  /** What-if expenses paid from Wise (Weekly What-If only). */
+  whatIfOut: WeeklyItem[] = []
 ): WiseWeekRow[] {
   const transferIn = recurringLines
     .filter((r) => (r.toAccount ?? RECURRING_ROUTES[r.id]) === "wise")
@@ -469,6 +520,10 @@ export function buildWiseWeeks(
       billLines[b.id] = a;
       out += a;
     }
+    const whatIf = whatIfOut
+      .filter((it) => it.type === "out" && it.account === "wise" && it.week === w)
+      .reduce((t, it) => t + Number(it.amount || 0), 0);
+    out += whatIf;
     // This week starts from the Wise bank balance now, if Katie has given it, and
     // only a transfer still to go is added (one already made is in the balance).
     const isNow = !!now && now.balances.wise !== undefined && now.week === isoLocal(wc);
@@ -492,8 +547,41 @@ export function buildWiseWeeks(
       net: Math.round((tin - out) * 100) / 100,
       closing,
       billLines,
+      whatIf,
     });
     running = closing;
   }
   return rows;
+}
+
+
+// ── How much more income stops an account going red (Katie, 16 Oct 2026) ──
+
+/** What each account receives from $1 of income, after the Stripe fee and her PF %. */
+export function shareOfIncome(alloc: AccountBalances, feePct: number): Record<string, number> {
+  const g = 10000; // the split is a straight line, so any amount gives the same share
+  const a = allocateAfterFee(g, g * (feePct / 100), alloc);
+  const out: Record<string, number> = {};
+  for (const k of ACCOUNT_KEYS) out[k] = k === "income" ? 0 : a[k] / g;
+  return out;
+}
+
+/**
+ * The extra income needed EVERY week from next week on, so this account never
+ * closes below $0 across the weeks shown. 0 when it never goes red. null when
+ * extra income cannot fix it (the account gets no share of income, e.g. Wise).
+ * Agreed with Katie 16 Oct 2026: one weekly figure per account, through her split.
+ */
+export function incomeNeeded(rows: AccountWeekRow[], share: number): number | null {
+  let need = 0;
+  let weeksOfExtra = 0;
+  for (const r of rows) {
+    // This week (from the bank balance) and weeks with actual transfers are done.
+    if (!r.stillToGo && !r.actual) weeksOfExtra++;
+    if (r.closing >= 0) continue;
+    if (weeksOfExtra === 0) continue; // already red this week - future income cannot reach it
+    if (share <= 0) return null;
+    need = Math.max(need, -r.closing / (share * weeksOfExtra));
+  }
+  return Math.ceil(need * 100) / 100;
 }

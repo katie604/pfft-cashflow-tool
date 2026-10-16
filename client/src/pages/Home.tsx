@@ -429,13 +429,14 @@ export default function Home() {
             <AccountGraphs settings={settings} results={viewResults} />
           )}
           {activeTab === "weekly" && (
-            <WeeklyBoard
+            // Katie, 16 Oct 2026: the What-If is the cash flow table again, with
+            // play percentages, expenses she adds and "needs $X more income".
+            <WeeklyTable
               weekly={weeklyBoard.weekly}
-              moveItem={weeklyBoard.moveItem}
-              addItem={weeklyBoard.addItem}
-              updateItem={weeklyBoard.updateItem}
-              deleteItem={weeklyBoard.deleteItem}
-              setStartingCash={weeklyBoard.setStartingCash}
+              allocations={settings.allocations}
+              onSetIncome={weeklyBoard.setIncomeOverride}
+              onSetRecurring={weeklyBoard.setRecurringAmount}
+              whatIf={{ addItem: weeklyBoard.addItem, deleteItem: weeklyBoard.deleteItem }}
             />
           )}
         </div>
