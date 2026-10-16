@@ -1,13 +1,16 @@
 // ============================================================
 // PFFT Cashflow Tool — Account Graphs Tab
-// Features:
-//   1. "All Accounts" combined total chart at the top
-//   2. One chart per account (7 total)
-//   3. Balance line turns RED when it dips below zero
-//   4. BAS due date vertical markers on BAS chart
+// Katie, 16 Oct 2026: built off the CASH FLOW TABLE - the same weekly
+// numbers (bank balances now, income estimates, wages, ATO, Wise, BAS),
+// run out to 52 weeks and shown weekly / monthly / 2-monthly / 3-monthly.
+//   1. "All Accounts" combined total at the top
+//   2. One chart per account, plus Wise
+//   3. Balance dots turn RED below $0
+//   4. BAS due date markers on the BAS chart
 //   5. Minimum balance dashed reference line per account
 // ============================================================
 
+import { useState } from "react";
 import {
   ComposedChart,
   Bar,
@@ -22,44 +25,120 @@ import {
 import {
   ACCOUNT_CONFIGS,
   AccountKey,
-  MonthResult,
   ProjectionSettings,
-  getMonthLabel,
   formatCurrency,
-  totalBalance,
   ACCOUNT_KEYS,
 } from "@/lib/cashflow";
 import { AlertTriangle } from "lucide-react";
 import { useBasPayments } from "@/hooks/useBasPayments";
-import type { BasPayment } from "@/lib/weekly";
+import {
+  WeeklyData,
+  AccountWeekRow,
+  buildAccountWeeks,
+  buildWiseWeeks,
+  isoLocal,
+  weekCommencing,
+} from "@/lib/weekly";
+import { useIncomeEstimates, useActualTransfers, useMonthlyBills } from "@/components/WeeklyTable";
+import { Period, PERIODS, GraphPoint, groupWeeks, groupRows } from "@/lib/graphPeriods";
 
-/** "25 Nov" from "2026-11-25". */
-function dueText(due: string): string {
-  const [y, m, d] = due.split("-").map(Number);
-  return new Date(y, m - 1, d).toLocaleDateString("en-AU", { day: "numeric", month: "short" });
-}
+const GRAPH_WEEKS = 52;
+const WISE_CFG = {
+  key: "wise",
+  label: "Wise",
+  colorHex: "#1a6f77",
+  description: "Topped up from OpEx each week; pays the monthly subscriptions",
+};
+type ChartAccount = { key: string; label: string; colorHex: string; description: string };
 
 interface AccountGraphsProps {
   settings: ProjectionSettings;
-  results: MonthResult[];
+  weekly: WeeklyData;
 }
 
-export default function AccountGraphs({ settings, results }: AccountGraphsProps) {
-  // Katie, 16 Oct 2026: the BAS markers come from the same due dates as the weekly table.
+export default function AccountGraphs({ settings, weekly }: AccountGraphsProps) {
+  const [period, setPeriod] = useState<Period>("monthly");
   const [basPayments] = useBasPayments();
+  const [estimates, , feePct, nowBal] = useIncomeEstimates();
+  const actuals = useActualTransfers();
+  const bills = useMonthlyBills();
+  const recurring = weekly.recurringLines ?? [];
+
+  // Past the last income estimate, carry the last one forward so the year has income.
+  const est = { ...estimates };
+  const keys = Object.keys(estimates).sort();
+  const lastIso = keys[keys.length - 1];
+  if (lastIso) {
+    for (let w = 0; w < GRAPH_WEEKS; w++) {
+      const iso = isoLocal(weekCommencing(weekly.weekStart, w));
+      if (iso > lastIso && est[iso] === undefined) est[iso] = estimates[lastIso];
+    }
+  }
+  const lastEstDate = lastIso
+    ? new Date(lastIso + "T00:00:00").toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" })
+    : "";
+
+  const acct = buildAccountWeeks(
+    weekly, GRAPH_WEEKS, settings.allocations, weekly.incomeOverride ?? 0,
+    recurring, actuals, est, feePct, nowBal, basPayments
+  );
+  const wise = buildWiseWeeks(weekly, GRAPH_WEEKS, recurring, bills, nowBal);
+  const { groupOf, labels } = groupWeeks(weekly.weekStart, GRAPH_WEEKS, period);
+
+  // The total, the way the table's Total view works: money in = new income,
+  // money out = what actually leaves; moves between accounts net to zero.
+  const totalRows: AccountWeekRow[] = acct.income.map((inc, w) => {
+    const all = ACCOUNT_KEYS.map((k) => acct[k][w]);
+    const opening = all.reduce((t, r) => t + r.opening, 0) + wise[w].opening;
+    const closing = Math.round((all.reduce((t, r) => t + r.closing, 0) + wise[w].closing) * 100) / 100;
+    const moneyIn = all.some((r) => r.stillToGo) ? 0 : inc.moneyIn;
+    const net = closing - opening;
+    return { ...inc, opening, closing, moneyIn, transfersIn: 0, moneyOut: Math.round((moneyIn - net) * 100) / 100 };
+  });
+
+  const charts: ChartAccount[] = [
+    ...ACCOUNT_CONFIGS.map((a) => ({ key: a.key, label: a.label, colorHex: a.colorHex, description: a.description })),
+  ];
+  const opexAt = charts.findIndex((c) => c.key === "opex");
+  charts.splice(opexAt + 1, 0, WISE_CFG);
+
   return (
     <div className="overflow-auto h-full bg-background px-6 py-6 space-y-6">
-      {/* All Accounts combined chart */}
-      <AllAccountsChart settings={settings} results={results} />
+      <div className="flex items-center gap-3 flex-wrap">
+        <span className="text-sm font-semibold text-foreground">Show by</span>
+        <div className="inline-flex rounded-lg border border-border overflow-hidden">
+          {PERIODS.map((p) => (
+            <button
+              key={p.key}
+              data-period={p.key}
+              onClick={() => setPeriod(p.key)}
+              className={`px-3 py-1.5 text-xs font-medium border-r border-border last:border-r-0 ${
+                period === p.key ? "bg-primary text-primary-foreground" : "bg-white text-muted-foreground hover:bg-muted"
+              }`}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+        <span className="text-xs text-muted-foreground">
+          Same numbers as the cash flow table, 52 weeks out from this week.
+          {lastEstDate && ` After ${lastEstDate} your last income estimate is carried forward.`}
+        </span>
+      </div>
 
-      {/* Individual account charts */}
-      {ACCOUNT_CONFIGS.map((account) => (
+      <AllAccountsChart points={groupRows(totalRows, groupOf, labels)} />
+
+      {charts.map((c) => (
         <AccountChart
-          key={account.key}
-          accountKey={account.key}
+          key={c.key}
+          account={c}
           settings={settings}
-          results={results}
-          basPayments={basPayments}
+          points={groupRows(
+            c.key === "wise" ? wise : acct[c.key as AccountKey],
+            groupOf,
+            labels,
+            c.key === "bas" ? basPayments : []
+          )}
         />
       ))}
     </div>
@@ -68,34 +147,16 @@ export default function AccountGraphs({ settings, results }: AccountGraphsProps)
 
 // ── All Accounts Combined Chart ───────────────────────────────
 
-function AllAccountsChart({
-  settings,
-  results,
-}: {
-  settings: ProjectionSettings;
-  results: MonthResult[];
-}) {
-  const data = results.map((r, i) => {
-    const totalIn = ACCOUNT_KEYS.reduce((s, k) => s + r.allocations[k], 0);
-    const totalOut = ACCOUNT_KEYS.reduce((s, k) => s + r.withdrawals[k], 0);
-    const balance = totalBalance(r.closingBalances);
-    return {
-      month: getMonthLabel(settings.startMonth, settings.startYear, i),
-      totalIn,
-      totalOut,
-      balance,
-    };
-  });
-
+function AllAccountsChart({ points }: { points: GraphPoint[] }) {
+  const data = points.map((p) => ({ month: p.label, totalIn: p.inflow, totalOut: p.outflow, balance: p.balance }));
   const hasNegative = data.some((d) => d.balance < 0);
-  const endY1 = totalBalance(results[11]?.closingBalances ?? {} as any);
-  const endY2 = totalBalance(results[23]?.closingBalances ?? {} as any);
+  const endBal = data[data.length - 1]?.balance ?? 0;
+  const lowest = data.reduce((lo, d) => Math.min(lo, d.balance), data[0]?.balance ?? 0);
   const totalIn = data.reduce((s, d) => s + d.totalIn, 0);
   const totalOut = data.reduce((s, d) => s + d.totalOut, 0);
-  const year1EndLabel = getMonthLabel(settings.startMonth, settings.startYear, 11);
 
   return (
-    <div className="bg-white rounded-xl border-2 border-primary/20 shadow-sm overflow-hidden">
+    <div className="bg-white rounded-xl border-2 border-primary/20 shadow-sm overflow-hidden" data-chart="total">
       <div className="flex items-center justify-between px-5 py-4 border-b border-border bg-primary/5">
         <div className="flex items-center gap-3">
           <div className="h-8 w-8 rounded-lg bg-primary/15 flex items-center justify-center">
@@ -106,13 +167,13 @@ function AllAccountsChart({
             </div>
           </div>
           <div>
-            <h3 className="text-sm font-bold text-foreground">All Accounts — Combined Total</h3>
-            <p className="text-xs text-muted-foreground">Sum of all 7 Profit First accounts over 24 months</p>
+            <h3 className="text-sm font-bold text-foreground">All Accounts - Combined Total</h3>
+            <p className="text-xs text-muted-foreground">Every bank account together, including Wise</p>
           </div>
         </div>
         <div className="flex items-center gap-6 text-right shrink-0">
-          <StatPill label="End Yr 1" value={endY1} colorHex="#2d7a4f" />
-          <StatPill label="End Yr 2" value={endY2} colorHex="#2d7a4f" />
+          <StatPill label="End balance" value={endBal} colorHex="#2d7a4f" />
+          <StatPill label="Lowest" value={lowest} colorHex="#2d7a4f" />
           <StatPill label="Total In" value={totalIn} colorHex="#2d7a4f" />
           <StatPill label="Total Out" value={totalOut} colorHex="#b04040" negative />
           {hasNegative && (
@@ -128,16 +189,15 @@ function AllAccountsChart({
         <ResponsiveContainer width="100%" height={220}>
           <ComposedChart data={data} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#f0ede8" vertical={false} />
-            <XAxis dataKey="month" tick={{ fontSize: 10, fill: "#999" }} tickLine={false} axisLine={false} interval={1} />
+            <XAxis dataKey="month" tick={{ fontSize: 10, fill: "#999" }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
             <YAxis tick={{ fontSize: 10, fill: "#999" }} tickLine={false} axisLine={false} tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} width={52} />
             <Tooltip content={<AllAccountsTooltip />} />
             <ReferenceLine y={0} stroke={hasNegative ? "#ef4444" : "#e5e7eb"} strokeWidth={hasNegative ? 1.5 : 1} strokeDasharray="4 3" />
-            <ReferenceLine x={year1EndLabel} stroke="#d1d5db" strokeDasharray="4 3" label={{ value: "Y2 →", position: "insideTopRight", fontSize: 9, fill: "#aaa" }} />
             <Bar dataKey="totalIn" name="Total In" fill="#2d7a4f" fillOpacity={0.5} radius={[2,2,0,0]} maxBarSize={20} />
             <Bar dataKey="totalOut" name="Total Out" fill="#b04040" fillOpacity={0.5} radius={[2,2,0,0]} maxBarSize={20} />
+            <Line type="monotone" dataKey="balance" name="Balance" strokeWidth={0} dot={false} activeDot={false} />
           </ComposedChart>
         </ResponsiveContainer>
-        {/* Balance line overlay */}
         <div style={{ marginTop: -220, pointerEvents: "none" }}>
           <ResponsiveContainer width="100%" height={220}>
             <ComposedChart data={data} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
@@ -152,11 +212,6 @@ function AllAccountsChart({
                   const { cx, cy, payload } = props;
                   const isNeg = payload.balance < 0;
                   return <circle key={`dot-all-${payload.month}`} cx={cx} cy={cy} r={3} fill={isNeg ? "#ef4444" : "#2d7a4f"} stroke="white" strokeWidth={1} />;
-                }}
-                activeDot={(props: any) => {
-                  const { cx, cy, payload } = props;
-                  const isNeg = payload.balance < 0;
-                  return <circle key={`adot-all-${payload.month}`} cx={cx} cy={cy} r={5} fill={isNeg ? "#ef4444" : "#2d7a4f"} stroke="white" strokeWidth={1.5} />;
                 }}
               />
             </ComposedChart>
@@ -177,76 +232,57 @@ function AllAccountsChart({
 // ── Per-account chart ─────────────────────────────────────────
 
 function AccountChart({
-  accountKey,
+  account,
   settings,
-  results,
-  basPayments = [],
+  points,
 }: {
-  accountKey: AccountKey;
+  account: ChartAccount;
   settings: ProjectionSettings;
-  results: MonthResult[];
-  basPayments?: BasPayment[];
+  points: GraphPoint[];
 }) {
-  const account = ACCOUNT_CONFIGS.find((a) => a.key === accountKey)!;
-  const minBalance = settings.minBalances?.[accountKey] ?? 0;
+  const accountKey = account.key;
+  const minBalance = (settings.minBalances as Record<string, number> | undefined)?.[accountKey] ?? 0;
   const hasMinBalance = minBalance > 0;
-
-  // BAS lodgement markers — only for BAS account
   const isBas = accountKey === "bas";
-  const basLodgementMonths = settings.basLodgementMonths ?? [0, 3, 6, 9];
-  const basLodgementDay = settings.basLodgementDay ?? 28;
-
-  // Profit distribution markers — only for Profit account
   const isProfit = accountKey === "profit";
   const profitDistributionMonths = settings.profitDistributionMonths ?? [0, 3, 6, 9];
   const profitDistributionDay = settings.profitDistributionDay ?? 1;
 
-  // Build chart data
-  const data = results.map((r, i) => {
-    const actualMonth = (settings.startMonth + i) % 12;
-    // Katie's own BAS due dates win; the old month toggles only when there are none.
-    const md = new Date(settings.startYear, settings.startMonth + i, 1);
-    const basHits = basPayments.filter((p) => {
-      const [y, m] = p.due.split("-").map(Number);
-      return y === md.getFullYear() && m - 1 === md.getMonth();
-    });
-    const isBasDue = isBas && (basPayments.length ? basHits.length > 0 : basLodgementMonths.includes(actualMonth));
-    const basDueLabel = basHits.length ? `Due ${basHits.map((p) => dueText(p.due)).join(", ")}` : `Due ${basLodgementDay}th`;
-    const isProfitDist = isProfit && profitDistributionMonths.includes(actualMonth);
+  const data = points.map((p) => {
+    // A profit distribution date (day of the month, in the chosen months) inside the period.
+    let isProfitDist = false;
+    if (isProfit) {
+      for (let d = new Date(p.start.getFullYear(), p.start.getMonth(), 1); d < p.end; d.setMonth(d.getMonth() + 1)) {
+        const day = new Date(d.getFullYear(), d.getMonth(), profitDistributionDay);
+        if (profitDistributionMonths.includes(d.getMonth()) && day >= p.start && day < p.end) isProfitDist = true;
+      }
+    }
     return {
-      month: getMonthLabel(settings.startMonth, settings.startYear, i),
-      inflow: r.allocations[accountKey],
-      outflow: r.withdrawals[accountKey],
-      balance: r.closingBalances[accountKey],
-      isBasDue,
-      basDueLabel,
+      month: p.label,
+      inflow: p.inflow,
+      outflow: p.outflow,
+      balance: p.balance,
+      isBasDue: isBas && !!p.isBasDue,
+      basDueLabel: p.basDueLabel ?? "",
       isProfitDist,
     };
   });
 
   const hasNegative = data.some((d) => d.balance < 0);
   const belowMinBalance = hasMinBalance && data.some((d) => d.balance < minBalance && d.balance >= 0);
-  const endY1Balance = results[11]?.closingBalances[accountKey] ?? 0;
-  const endY2Balance = results[23]?.closingBalances[accountKey] ?? 0;
-  const totalIn = results.reduce((s, r) => s + r.allocations[accountKey], 0);
-  const totalOut = results.reduce((s, r) => s + r.withdrawals[accountKey], 0);
-  const year1EndLabel = getMonthLabel(settings.startMonth, settings.startYear, 11);
+  const endBalance = data[data.length - 1]?.balance ?? 0;
+  const lowest = data.reduce((lo, d) => Math.min(lo, d.balance), data[0]?.balance ?? 0);
+  const totalIn = data.reduce((s, d) => s + d.inflow, 0);
+  const totalOut = data.reduce((s, d) => s + d.outflow, 0);
 
-  // BAS due date labels for reference lines
-  const basMarkerLabels = data
-    .filter((d) => d.isBasDue)
-    .map((d) => d.month);
+  const basMarkerLabels = data.filter((d) => d.isBasDue).map((d) => d.month);
   const basMarkerText: Record<string, string> = Object.fromEntries(
     data.filter((d) => d.isBasDue).map((d) => [d.month, d.basDueLabel])
   );
-
-  // Profit distribution labels for reference lines
-  const profitDistMarkerLabels = data
-    .filter((d) => d.isProfitDist)
-    .map((d) => d.month);
+  const profitDistMarkerLabels = data.filter((d) => d.isProfitDist).map((d) => d.month);
 
   return (
-    <div className="bg-white rounded-xl border border-border shadow-sm overflow-hidden">
+    <div className="bg-white rounded-xl border border-border shadow-sm overflow-hidden" data-chart={accountKey}>
       {/* Card header */}
       <div className="flex items-center justify-between px-5 py-4 border-b border-border">
         <div className="flex items-center gap-3">
@@ -263,22 +299,14 @@ function AccountChart({
         </div>
 
         <div className="flex items-center gap-6 text-right shrink-0 flex-wrap justify-end">
-          <StatPill label="End Yr 1" value={endY1Balance} colorHex={account.colorHex} />
-          <StatPill label="End Yr 2" value={endY2Balance} colorHex={account.colorHex} />
+          <StatPill label="End balance" value={endBalance} colorHex={account.colorHex} />
+          <StatPill label="Lowest" value={lowest} colorHex={account.colorHex} />
           <StatPill label="Total In" value={totalIn} colorHex={account.colorHex} />
           <StatPill label="Total Out" value={totalOut} colorHex="#b04040" negative />
-          {hasMinBalance && (
-            <div className="text-right">
-              <p className="text-[10px] text-muted-foreground mb-0.5">Min Target</p>
-              <p className="text-sm font-bold" style={{ color: account.colorHex }}>
-                {formatCurrency(minBalance)}
-              </p>
-            </div>
-          )}
           {hasNegative && (
             <div className="flex items-center gap-1.5 bg-red-50 border border-red-200 rounded-lg px-2.5 py-1">
-              <div className="h-2 w-2 rounded-full bg-red-500 animate-pulse" />
-              <span className="text-xs font-semibold text-red-600">Goes below $0</span>
+              <AlertTriangle className="h-3 w-3 text-red-500" />
+              <span className="text-xs font-semibold text-red-600">Dips below $0</span>
             </div>
           )}
           {!hasNegative && belowMinBalance && (
@@ -291,9 +319,7 @@ function AccountChart({
             <div className="flex items-center gap-1.5 bg-orange-50 border border-orange-200 rounded-lg px-2.5 py-1">
               <div className="h-2 w-2 rounded-full bg-orange-500" />
               <span className="text-xs font-semibold text-orange-600">
-                {basPayments.length
-                  ? `BAS due ${basPayments.map((p) => dueText(p.due)).join(", ")}`
-                  : `BAS due ${basLodgementDay}th`}
+                BAS {Object.values(basMarkerText).join(", ").replace(/Due /g, "due ")}
               </span>
             </div>
           )}
@@ -313,14 +339,10 @@ function AccountChart({
         <ResponsiveContainer width="100%" height={220}>
           <ComposedChart data={data} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#f0ede8" vertical={false} />
-            <XAxis dataKey="month" tick={{ fontSize: 10, fill: "#999" }} tickLine={false} axisLine={false} interval={1} />
+            <XAxis dataKey="month" tick={{ fontSize: 10, fill: "#999" }} tickLine={false} axisLine={false} interval="preserveStartEnd" />
             <YAxis tick={{ fontSize: 10, fill: "#999" }} tickLine={false} axisLine={false} tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`} width={52} />
             <Tooltip content={<AccountTooltip account={account} minBalance={minBalance} />} />
-
-            {/* Zero line */}
             <ReferenceLine y={0} stroke={hasNegative ? "#ef4444" : "#e5e7eb"} strokeWidth={hasNegative ? 1.5 : 1} strokeDasharray={hasNegative ? "4 3" : "3 3"} label={hasNegative ? { value: "$0", position: "right", fontSize: 10, fill: "#ef4444" } : undefined} />
-
-            {/* Minimum balance target line */}
             {hasMinBalance && (
               <ReferenceLine
                 y={minBalance}
@@ -330,11 +352,6 @@ function AccountChart({
                 label={{ value: `Min ${formatCurrency(minBalance)}`, position: "right", fontSize: 9, fill: account.colorHex }}
               />
             )}
-
-            {/* Year divider */}
-            <ReferenceLine x={year1EndLabel} stroke="#d1d5db" strokeDasharray="4 3" label={{ value: "Y2 →", position: "insideTopRight", fontSize: 9, fill: "#aaa" }} />
-
-            {/* BAS due date markers */}
             {isBas && basMarkerLabels.map((label) => (
               <ReferenceLine
                 key={`bas-due-${label}`}
@@ -345,8 +362,6 @@ function AccountChart({
                 label={{ value: basMarkerText[label], position: "insideTopLeft", fontSize: 8, fill: "#f97316" }}
               />
             ))}
-
-            {/* Profit distribution markers */}
             {isProfit && profitDistMarkerLabels.map((label) => (
               <ReferenceLine
                 key={`profit-dist-${label}`}
@@ -357,19 +372,12 @@ function AccountChart({
                 label={{ value: `Profit Dist. ${profitDistributionDay === 1 ? "1st" : `${profitDistributionDay}th`}`, position: "insideTopLeft", fontSize: 8, fill: "#ca8a04" }}
               />
             ))}
-
-            {/* Money In bars */}
             <Bar dataKey="inflow" name="Money In" fill={account.colorHex} fillOpacity={0.55} radius={[2,2,0,0]} maxBarSize={20} />
-
-            {/* Money Out bars */}
             <Bar dataKey="outflow" name="Money Out" fill="#b04040" fillOpacity={0.5} radius={[2,2,0,0]} maxBarSize={20} />
-
-            {/* Invisible line for tooltip data */}
             <Line type="monotone" dataKey="balance" name="Balance" strokeWidth={0} dot={false} activeDot={false} />
           </ComposedChart>
         </ResponsiveContainer>
 
-        {/* Balance line overlay with red-below-zero dots */}
         <div style={{ marginTop: -220, pointerEvents: "none" }}>
           <ResponsiveContainer width="100%" height={220}>
             <ComposedChart data={data} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
@@ -387,20 +395,12 @@ function AccountChart({
                   const dotColor = isNeg ? "#ef4444" : isBelowMin ? "#f59e0b" : account.colorHex;
                   return <circle key={`dot-${accountKey}-${payload.month}`} cx={cx} cy={cy} r={3} fill={dotColor} stroke="white" strokeWidth={1} />;
                 }}
-                activeDot={(props: any) => {
-                  const { cx, cy, payload } = props;
-                  const isNeg = payload.balance < 0;
-                  const isBelowMin = hasMinBalance && payload.balance < minBalance && payload.balance >= 0;
-                  const dotColor = isNeg ? "#ef4444" : isBelowMin ? "#f59e0b" : account.colorHex;
-                  return <circle key={`adot-${accountKey}-${payload.month}`} cx={cx} cy={cy} r={5} fill={dotColor} stroke="white" strokeWidth={1.5} />;
-                }}
               />
             </ComposedChart>
           </ResponsiveContainer>
         </div>
       </div>
 
-      {/* Legend */}
       <div className="flex items-center gap-5 px-5 pb-4 flex-wrap">
         <LegendItem color={account.colorHex} label="Money In" opacity={0.55} />
         <LegendItem color="#b04040" label="Money Out" opacity={0.5} />

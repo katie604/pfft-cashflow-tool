@@ -426,7 +426,7 @@ export default function Home() {
             </div>
           )}
           {activeTab === "graphs" && (
-            <AccountGraphs settings={settings} results={viewResults} />
+            <AccountGraphs settings={settings} weekly={weeklyBoard.weekly} />
           )}
           {activeTab === "weekly" && (
             // Katie, 16 Oct 2026: the What-If is the cash flow table again, with
