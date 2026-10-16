@@ -49,6 +49,64 @@ export interface RecurringLine {
   /** Show this out-line straight under the moved-in row of that line (Katie,
    *  16 Oct 2026: her super comes into OpEx and goes straight back out). */
   afterId?: string;
+  /** Paid once a month on this day instead of every week (Katie, 16 Oct 2026 - PFANZ's
+   *  Profit First Prophet direct debit, $198 on the 10th). weeklyAmount then holds the
+   *  MONTHLY amount; a 31 lands on the last day of shorter months. */
+  monthDay?: number;
+  /** Paid once a month on the first of this weekday (0 Sun - 6 Sat) AFTER day monthAfter
+   *  (Katie, 16 Oct 2026 - PFANZ's Wholistic Vitality and Nourish Your Numbers: "the first
+   *  Friday after the 7th of the month, so just one payment", corrected 22:23: "on or before the
+   *  7th, the Friday" -> monthWeekday 5, monthAfter 0, i.e. the Friday from the 1st to the 7th). weeklyAmount then holds the MONTHLY amount. */
+  monthWeekday?: number;
+  monthAfter?: number;
+  /** Paid every 14 days, on this date and every fortnight either side of it (Katie, 16 Oct
+   *  2026 - PFANZ: Adam's wage and his super go out fortnightly; Xero shows Mondays from
+   *  5 Oct 2026). ISO date. weeklyAmount then holds the FORTNIGHTLY amount. */
+  fortnightFrom?: string;
+}
+
+/** True when a line is paid once a month rather than every week. */
+export function isMonthly(r: RecurringLine): boolean {
+  return !!r.monthDay || r.monthWeekday !== undefined || !!r.fortnightFrom;
+}
+
+/** In words, for the hover text on a monthly line. */
+export function monthlyWhen(r: RecurringLine): string {
+  if (r.fortnightFrom) return `every second week (fortnightly, from ${r.fortnightFrom})`;
+  if (r.monthWeekday !== undefined) {
+    const day = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"][r.monthWeekday];
+    if (!r.monthAfter) return `the first ${day} of each month (on or before the 7th)`;
+    return `the first ${day} after the ${r.monthAfter}th of each month`;
+  }
+  return `the ${r.monthDay}th of each month`;
+}
+
+/** What a line takes out in the 7 days from wkStart: its weekly amount, or - for a
+ *  monthly line - its monthly amount in the one week that holds its day. */
+export function lineInWeek(r: RecurringLine, wkStart: Date): number {
+  if (!isMonthly(r)) return r.weeklyAmount;
+  let total = 0;
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(wkStart);
+    d.setDate(d.getDate() + i);
+    if (r.fortnightFrom) {
+      const [y, m, dd] = r.fortnightFrom.split("-").map(Number);
+      const days = Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime() -
+        new Date(y, m - 1, dd).getTime()) / 86400000);
+      if (((days % 14) + 14) % 14 === 0) total += r.weeklyAmount;
+      continue;
+    }
+    if (r.monthWeekday !== undefined) {
+      // The first such weekday after day monthAfter always falls within the next 7 days.
+      const after = r.monthAfter ?? 0;
+      if (d.getDay() === r.monthWeekday && d.getDate() > after && d.getDate() <= after + 7)
+        total += r.weeklyAmount;
+      continue;
+    }
+    const last = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+    if (d.getDate() === Math.min(r.monthDay!, last)) total += r.weeklyAmount;
+  }
+  return total;
 }
 
 /** Where a seeded line moves its money to. Also applied to lines saved before
@@ -204,8 +262,20 @@ export function lowestPoint(rows: WeekRow[]): WeekRow | null {
  *  PFANZ): a licence fee taken as a % of what is left after BAS, and Materials & Subs on that
  *  same after-BAS amount. null = the standard order (every builder, EBS). */
 export interface Waterfall {
-  licenceFee?: { pct: number; label: string };
+  licenceFee?: {
+    pct: number;
+    label: string;
+    /** When the licence fee account pays out (Katie, 16 Oct 2026 - PFANZ): on `day` of each
+     *  month it pays out everything that went in during the previous calendar month. The
+     *  weekly transfer in happens on `allocWeekday` (0 Sun - 6 Sat; PFANZ allocates Fridays),
+     *  so that day decides which month a week's transfer belongs to. */
+    payout?: { day: number; allocWeekday: number };
+  };
   matsubsBase?: string;
+  /** true = the Materials & Subs % INCLUDES the licence fee, so M&S's own row gets the
+   *  M&S % less the licence %. PFANZ, Katie 16 Oct 2026 17:29: 45% M&S of which 15% is the
+   *  licence fee -> $150 licence + $300 M&S on $1,000 after BAS. */
+  licenceInsideMatsubs?: boolean;
 }
 /** The licence fee's own ledger row - only present when the business has one. */
 export const LICENCE_KEY = "licence";
@@ -216,7 +286,9 @@ function allocateIncome(gross: number, alloc: AccountBalances, wf: Waterfall | n
   const bas = gross * (alloc.bas / 100);
   const afterBas = gross - bas;
   const licence = wf?.licenceFee ? afterBas * (wf.licenceFee.pct / 100) : 0;
-  const materials = (wf?.matsubsBase === "afterBas" ? afterBas : gross) * (alloc.materials / 100);
+  const msPct = wf?.licenceInsideMatsubs && wf?.licenceFee
+    ? Math.max(0, alloc.materials - wf.licenceFee.pct) : alloc.materials;
+  const materials = (wf?.matsubsBase === "afterBas" ? afterBas : gross) * (msPct / 100);
   const realRev = Math.max(0, gross - bas - licence - materials);
   const profit = realRev * (alloc.profit / 100);
   const ownersPay = realRev * (alloc.ownersPay / 100);
@@ -294,6 +366,8 @@ export interface AccountWeekRow {
   expected?: number;
   /** BAS account only: paid to the ATO this week (Katie, 16 Oct 2026). */
   basPaid?: number;
+  /** Licence fee account only: last month's licence fee paid out this week. */
+  licencePaid?: number;
   /** What-if expenses added on the Weekly What-If, paid from this account. */
   whatIf?: number;
 }
@@ -376,13 +450,19 @@ export function buildAccountWeeks(
     const wk = (outMap[o.week] ??= {});
     wk[o.account] = (wk[o.account] ?? 0) + o.amount;
   }
-  const recByAccount: Record<string, number> = {};
-  const recInByAccount: Record<string, number> = {};
-  for (const r of recurringLines) {
-    recByAccount[r.account] = (recByAccount[r.account] ?? 0) + r.weeklyAmount;
-    const to = r.toAccount ?? RECURRING_ROUTES[r.id];
-    if (to) recInByAccount[to] = (recInByAccount[to] ?? 0) + r.weeklyAmount;
-  }
+  // Per week, because a monthly line (monthDay) only lands in one week of the month.
+  const recFor = (w: number) => {
+    const wc = weekCommencing(data.weekStart, w);
+    const by: Record<string, number> = {};
+    const inBy: Record<string, number> = {};
+    for (const r of recurringLines) {
+      const amt = lineInWeek(r, wc);
+      by[r.account] = (by[r.account] ?? 0) + amt;
+      const to = r.toAccount ?? RECURRING_ROUTES[r.id];
+      if (to) inBy[to] = (inBy[to] ?? 0) + amt;
+    }
+    return [by, inBy] as const;
+  };
 
   const grossByWeek: Record<number, number> = {};
   if (incomeOverride > 0) {
@@ -393,6 +473,14 @@ export function buildAccountWeeks(
       if (it.type === "in" && !it.account) grossByWeek[it.week] = (grossByWeek[it.week] ?? 0) + it.amount;
     }
   }
+
+  // Licence fee payout (PFANZ): what went in each month, keyed by the month of the
+  // allocation day. On the payout day the account pays its balance less anything that
+  // has already gone in during the current month - i.e. last month's total, plus any
+  // earlier balance (which is how transfers made before this table starts get paid).
+  const lp = wf?.licenceFee?.payout;
+  const licMonthIn: Record<string, number> = {};
+  const ym = (d: Date) => `${d.getFullYear()}-${d.getMonth()}`;
 
   const running: Record<string, number> = {};
   for (const k of KEYS) running[k] = (data.openingByAccount as Record<string, number> | undefined)?.[k] ?? 0;
@@ -423,6 +511,7 @@ export function buildAccountWeeks(
     const allocOutTotal = act ? sumOut(act) : expectedOut;
     const isNowWeek = !!now && now.week === isoLocal(weekCommencing(data.weekStart, w));
     const basPaid = basInWeek(basPayments, weekCommencing(data.weekStart, w));
+    const [recByAccount, recInByAccount] = recFor(w);
     for (const k of KEYS) {
       const paidAto = (k === "bas" ? basPaid : 0) + (whatIfMap[w]?.[k] ?? 0);
       const whatIf = whatIfMap[w]?.[k] ?? 0;
@@ -465,7 +554,21 @@ export function buildAccountWeeks(
       const allocOut = k === "income" ? allocOutTotal : 0;
       const feeOut = k === "income" ? fee : 0;
       const opexFeeOut = k === "opex" ? opexFee : 0;
-      const moneyOut = bills + recurring + allocOut + feeOut + paidAto + opexFeeOut;
+      let licencePaid = 0;
+      if (k === LICENCE_KEY && lp) {
+        const wc = weekCommencing(data.weekStart, w);
+        for (let i = 0; i < 7; i++) {
+          const d = new Date(wc);
+          d.setDate(d.getDate() + i);
+          if (d.getDate() === lp.day) {
+            licencePaid = Math.max(0, Math.round((opening - (licMonthIn[ym(d)] ?? 0)) * 100) / 100);
+          }
+        }
+        const alloc = new Date(wc);
+        alloc.setDate(alloc.getDate() + ((lp.allocWeekday - wc.getDay() + 7) % 7));
+        licMonthIn[ym(alloc)] = (licMonthIn[ym(alloc)] ?? 0) + Number(moneyIn || 0);
+      }
+      const moneyOut = bills + recurring + allocOut + feeOut + paidAto + opexFeeOut + licencePaid;
       // Round to the cent so a fully swept week shows $0, not "($0)" from float dust.
       const transfersIn = recInByAccount[k] ?? 0;
       const closing = Math.round((opening + moneyIn + transfersIn - moneyOut) * 100) / 100;
@@ -485,6 +588,7 @@ export function buildAccountWeeks(
         fee: feeOut,
         opexFee: opexFeeOut,
         basPaid: paidAto - whatIf,
+        licencePaid,
         whatIf,
         expected: k === "income" ? expectedOut : alloc[k],
       });

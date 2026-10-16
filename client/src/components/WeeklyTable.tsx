@@ -22,6 +22,9 @@ import {
   buildWeeks,
   buildAccountWeeks,
   WeeklyItem,
+  lineInWeek,
+  isMonthly,
+  monthlyWhen,
   shareOfIncome,
   incomeNeeded,
   Waterfall,
@@ -111,7 +114,11 @@ interface MemberCharge {
   counted: boolean;
   every: string;
   basis: string;
+  /** Hand-added annual renewals: "none" = nothing is set up to collect it (shown red), else where it is set up. */
+  setup?: string;
 }
+
+const NOT_SET_UP = "#b23b3b";
 
 /** Who pays in each week, keyed by the week's Monday. Empty for a business without it. */
 function useIncomeMembers(): [Record<string, MemberCharge[]>, string] {
@@ -168,6 +175,7 @@ function MembersRow({
           const iso = isoLocal(r.weekCommencing);
           const L = members[iso] ?? [];
           const n = L.filter((x) => x.counted).length;
+          const gap = L.some((x) => x.setup === "none");
           return (
             <td key={r.week} className="px-2 py-2 text-right border-b border-border/50 text-xs">
               {L.length ? (
@@ -179,9 +187,13 @@ function MembersRow({
                 >
                   {n} {n === 1 ? "member" : "members"} {open === iso ? "\u25B4" : "\u25BE"}
                 </button>
-              ) : (
-                "\u2013"
-              )}
+              ) : null}
+              {L.length && gap ? (
+                <div className="font-semibold" style={{ color: NOT_SET_UP }}>
+                  not set up
+                </div>
+              ) : null}
+              {L.length ? null : "\u2013"}
             </td>
           );
         })}
@@ -195,14 +207,20 @@ function MembersRow({
             <table className="text-xs">
               <tbody>
                 {list.map((x, i) => (
-                  <tr key={i} style={{ color: x.counted ? undefined : "#8b8b8b" }}>
+                  <tr
+                    key={i}
+                    style={{ color: x.setup === "none" ? NOT_SET_UP : x.counted ? undefined : "#8b8b8b", fontWeight: x.setup === "none" ? 600 : undefined }}
+                  >
                     <td className="pr-4 py-0.5">{dayLabel(x.date)}</td>
                     <td className="pr-4 py-0.5">{x.name}</td>
                     <td className="pr-4 py-0.5 text-right">{formatCurrency(x.amount)}</td>
-                    <td className="pr-4 py-0.5">every {x.every}</td>
+                    <td className="pr-4 py-0.5">{x.every === "once" ? "one-off" : `every ${x.every}`}</td>
                     <td className="py-0.5">
                       {x.counted ? "" : `${x.status.replace("_", " ")} - not counted`}
+                      {x.counted && x.status !== "active" && x.status !== "added by Katie" ? `${x.status.replace("_", " ")} - counted on your say` : ""}
+                      {x.every === "once" ? (x.basis.startsWith("TO ADD") ? "missed payments - TO ADD, amounts to confirm" : "missed payment, pencilled in") : ""}
                       {x.basis.startsWith("PLAN") ? " (plan price - not charged yet)" : ""}
+                      {x.setup === "none" ? "annual renewal - NOT SET UP anywhere, nothing will collect it" : x.setup ? `annual renewal - set up in ${x.setup}` : ""}
                     </td>
                   </tr>
                 ))}
@@ -893,7 +911,9 @@ export default function WeeklyTable({
                             : (account.key as string) === LICENCE_KEY
                             ? `${wf?.licenceFee?.pct}% of what is left after BAS`
                             : account.key === "materials" && wf?.matsubsBase === "afterBas"
-                            ? `${allocations.materials}% of what is left after BAS`
+                            ? (wf?.licenceInsideMatsubs && wf?.licenceFee
+                              ? `${Math.max(0, allocations.materials - wf.licenceFee.pct)}% of what is left after BAS (${allocations.materials}% less the ${wf.licenceFee.pct}% licence fee)`
+                              : `${allocations.materials}% of what is left after BAS`)
                             : `${allocations[account.key]}% of income`}
                         </div>
                         {isWhatIf && !isIncome && !isToOpen && ar.some((r) => r.closing < 0) && (() => {
@@ -984,7 +1004,7 @@ export default function WeeklyTable({
                                 account={acct}
                                 label={l.inLabel ?? `Moved in: ${l.label}`}
                                 rows={ar}
-                                pick={(r) => (r.stillToGo ? 0 : l.weeklyAmount)}
+                                pick={(r) => (r.stillToGo ? 0 : lineInWeek(l, r.weekCommencing))}
                                 rowType="allocation"
                               />
                               {recurringLines
@@ -1019,6 +1039,9 @@ export default function WeeklyTable({
                         {ar.some((r) => r.bills > 0) && (
                           <DetailRow account={acct} label="Bills (Xero)" rows={ar} pick={(r) => r.bills} rowType="withdrawal" />
                         )}
+                        {(account.key as string) === LICENCE_KEY && ar.some((r) => (r.licencePaid ?? 0) > 0) && (
+                          <DetailRow account={acct} label={`Paid out on the ${wf?.licenceFee?.payout?.day}th (last month's total)`} rows={ar} pick={(r) => r.licencePaid ?? 0} rowType="withdrawal" />
+                        )}
                         {account.key === "bas" && (
                           <>
                             <DetailRow account={acct} label="Paid to ATO (BAS)" rows={ar} pick={(r) => r.basPaid ?? 0} rowType="withdrawal" />
@@ -1041,7 +1064,8 @@ export default function WeeklyTable({
                                 const rem = nowBal.remaining[account.key] ?? {};
                                 return team.reduce((t, l) => t + Number(rem[l.id] ?? 0), 0);
                               }
-                              return team.reduce((t, l) => t + l.weeklyAmount, 0);
+                              // A fortnightly or monthly team line only counts in its own week.
+                              return team.reduce((t, l) => t + (r ? lineInWeek(l, r.weekCommencing) : l.weeklyAmount), 0);
                             }}
                           />
                         )}
@@ -1063,6 +1087,7 @@ export default function WeeklyTable({
                               numWeeks={numWeeks}
                               onSet={onSetRecurring}
                               paid={paidWeeks(ar, account.key, line.id)}
+                              rows={ar}
                             />
                           ))}
                         {whatIfItems
@@ -1225,9 +1250,12 @@ function RecurringRow({
   numWeeks,
   onSet,
   paid,
+  rows,
 }: {
   account: (typeof ACCOUNT_CONFIGS)[number];
   line: RecurringLine;
+  /** The account's weeks - needed to place a monthly line in the right week. */
+  rows?: AccountWeekRow[];
   numWeeks: number;
   onSet: (id: string, amount: number) => void;
   /** week -> amount still to go, or null = already paid that week. */
@@ -1252,6 +1280,12 @@ function RecurringRow({
               style={{ color: paid[w] === null ? GREY : OUT }}
               title={paid[w] === null ? "Already gone out this week" : "Still to go this week"}>
             {paid[w] === null ? "paid" : cell(paid[w] as number)}
+          </td>
+        ) : isMonthly(line) && rows?.[w] ? (
+          <td key={w} className="px-2 py-2 text-right border-b border-border/50 text-xs"
+              style={{ color: OUT }}
+              title={`${cell(line.weeklyAmount)} on ${monthlyWhen(line)}`}>
+            {lineInWeek(line, rows[w].weekCommencing) ? cell(lineInWeek(line, rows[w].weekCommencing)) : ""}
           </td>
         ) : (
           <RecurringCell key={w} value={line.weeklyAmount} onSet={(v) => onSet(line.id, v)} />

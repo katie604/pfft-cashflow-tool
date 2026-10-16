@@ -87,6 +87,8 @@ export function useWeeklyBoard() {
         const hide = new Set<string>(d?.hide ?? []);
         // Katie, 16 Oct 2026: any move between accounts reads "Moved out: <what> <who>".
         const rename: Record<string, string> = d?.rename ?? {};
+        // A schedule for a seeded line (e.g. PFANZ super, fortnightly - Katie 16 Oct 2026).
+        const schedules: Record<string, Partial<RecurringLine>> = d?.schedules ?? {};
         if (!Object.keys(amounts).length && !Object.keys(labels).length && !extra.length) return;
         setWeeklyState((prev) => {
           const next = {
@@ -102,6 +104,10 @@ export function useWeeklyBoard() {
                 ...(amounts[r.id] !== undefined ? { weeklyAmount: Number(amounts[r.id]) } : {}),
                 ...(labels[r.id] ? { inLabel: labels[r.id] } : {}),
                 ...(rename[r.id] ? { label: rename[r.id] } : {}),
+                // A line's schedule always comes from the helper, so a board saved
+                // before monthDay existed picks it up (16 Oct 2026).
+                ...(() => { const x = extra.find((e) => e.id === r.id); return x ? { monthDay: x.monthDay, monthWeekday: x.monthWeekday, monthAfter: x.monthAfter, fortnightFrom: x.fortnightFrom } : {}; })(),
+                ...(schedules[r.id] ?? {}),
               })
             ),
           };

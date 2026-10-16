@@ -14,7 +14,7 @@ import {
   buildAccountWeeks,
   buildWiseWeeks,
   shareOfIncome,
-  incomeNeeded,
+  incomeNeeded, lineInWeek
 } from "@/lib/weekly";
 import {
   formatCurrency,
@@ -152,7 +152,10 @@ export default function WeeklyBoard({
       if (r.stillToGo && nowBal) {
         const rem = nowBal.remaining[key]?.[l.id];
         if (l.weeklyAmount > 0) lines.push({ label: l.label, amount: rem !== undefined ? Number(rem) : null });
-      } else if (l.weeklyAmount > 0) lines.push({ label: l.label, amount: l.weeklyAmount });
+      } else {
+        const amt = lineInWeek(l, r.weekCommencing); // a monthly line only lands in its own week
+        if (amt > 0) lines.push({ label: l.label, amount: amt });
+      }
     }
     if (r.bills > 0) lines.push({ label: "Bills (Xero)", amount: r.bills });
     if ((r.basPaid ?? 0) > 0) lines.push({ label: "Paid to ATO (BAS)", amount: r.basPaid! });
