@@ -319,8 +319,8 @@ export function getMonthLabelLong(startMonth: number, startYear: number, index: 
 export function formatCurrency(value: number): string {
   const abs = Math.abs(value);
   const formatted = abs.toLocaleString("en-AU", {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
+    minimumFractionDigits: 2, // to the cent, never rounded (Katie, 16 Oct 2026)
+    maximumFractionDigits: 2,
   });
   return value < 0 ? `($${formatted})` : `$${formatted}`;
 }
@@ -328,8 +328,8 @@ export function formatCurrency(value: number): string {
 export function formatCurrencyInput(value: number): string {
   if (value === 0) return "";
   return value.toLocaleString("en-AU", {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
+    minimumFractionDigits: 2, // to the cent, never rounded (Katie, 16 Oct 2026)
+    maximumFractionDigits: 2,
   });
 }
 

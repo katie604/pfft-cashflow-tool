@@ -12,6 +12,10 @@ import {
   AccountWeekRow,
   RecurringLine,
   ActualTransfer,
+  MonthlyBill,
+  WiseWeekRow,
+  buildWiseWeeks,
+  isoLocal,
   buildWeeks,
   buildAccountWeeks,
 } from "@/lib/weekly";
@@ -36,22 +40,251 @@ interface Props {
   onSetRecurring: (id: string, amount: number) => void;
 }
 
-/** The Allocation Calculator's actual transfers for the business on screen.
- *  Re-read when the calculator (same page, an iframe) saves new ones. */
-function useActualTransfers(): ActualTransfer[] {
-  const read = (): ActualTransfer[] => {
+/** Income in - type an estimate into any week that has no actual yet
+ *  (Katie, 16 Oct 2026). Saved per business, by the week's Monday. */
+function IncomeInRow({
+  account,
+  rows,
+  onSet,
+}: {
+  account: (typeof ACCOUNT_CONFIGS)[number];
+  rows: AccountWeekRow[];
+  onSet: (weekIso: string, amount: number) => void;
+}) {
+  return (
+    <tr className="bg-white hover:bg-muted/40 transition-colors">
+      <td className="sticky-col px-4 py-2 border-b border-border/50 bg-white" style={{ borderLeftColor: account.colorHex + "60" }}>
+        <span className="text-xs pl-5 text-muted-foreground">Income in</span>
+        <div className="text-[10px] pl-5 text-muted-foreground/60">click a week to type the estimate</div>
+      </td>
+      {rows.map((r) =>
+        r.actual ? (
+          <td key={r.week} className="px-2 py-2 text-right border-b border-border/50 font-semibold" title="Actual">
+            {cell(r.moneyIn)}
+          </td>
+        ) : (
+          <RecurringCell
+            key={r.week}
+            value={r.moneyIn}
+            color={IN}
+            onSet={(v) => onSet(isoLocal(r.weekCommencing), v)}
+          />
+        )
+      )}
+    </tr>
+  );
+}
+
+/** Katie's per-week income estimates, from the helper's file. */
+function useIncomeEstimates(): [Record<string, number>, (weekIso: string, amount: number) => void, number] {
+  const [est, setEst] = useState<Record<string, number>>({});
+  const [feePct, setFeePct] = useState(0);
+  const tenant = () => {
     try {
-      const all = JSON.parse(localStorage.getItem("kcc-actual-transfers") || "[]") as ActualTransfer[];
-      const t = localStorage.getItem("kcc-tenant") || localStorage.getItem("pfft-pf-alloc-xero-tenant") || "";
-      return all.filter((a) => !t || !a.tenant || a.tenant === t);
+      return localStorage.getItem("kcc-tenant") || localStorage.getItem("pfft-pf-alloc-xero-tenant") || "";
     } catch {
-      return [];
+      return "";
     }
   };
-  const [list, setList] = useState<ActualTransfer[]>(read);
   useEffect(() => {
-    const refresh = () => setList(read());
-    window.addEventListener("storage", refresh);
+    const t = tenant();
+    if (!t) return;
+    fetch(`http://127.0.0.1:8765/api/income?tenant=${encodeURIComponent(t)}`)
+      .then((r) => r.json())
+      .then((d) => {
+        setEst(d?.income ?? {});
+        setFeePct(Number(d?.feePct ?? 0));
+      })
+      .catch(() => {
+        /* helper not running */
+      });
+  }, []);
+  const save = (weekIso: string, amount: number) => {
+    setEst((prev) => {
+      const next = { ...prev };
+      if (amount > 0) next[weekIso] = amount;
+      else delete next[weekIso];
+      return next;
+    });
+    const t = tenant();
+    if (t)
+      fetch("http://127.0.0.1:8765/api/income", {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: JSON.stringify({ tenant: t, week: weekIso, amount }),
+      }).catch(() => {
+        /* helper not running */
+      });
+  };
+  return [est, save, feePct];
+}
+
+/** The Team heading: a dropdown showing the weekly team total, click to open. */
+function TeamHeaderRow({
+  numWeeks,
+  color,
+  open,
+  onToggle,
+  total,
+}: {
+  numWeeks: number;
+  color: string;
+  open: boolean;
+  onToggle: () => void;
+  total: number;
+}) {
+  return (
+    <tr className="bg-white hover:bg-muted/40 cursor-pointer" onClick={onToggle}>
+      <td className="sticky-col px-4 py-2 border-b border-border/50 bg-white" style={{ borderLeftColor: color + "60" }}>
+        <span className="flex items-center gap-1 pl-5 text-[11px] font-bold uppercase tracking-wide" style={{ color }}>
+          Team
+          {open ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+        </span>
+      </td>
+      {Array.from({ length: numWeeks }, (_, w) => (
+        <td key={w} className="px-2 py-2 text-right border-b border-border/50 font-semibold" style={{ color: OUT }}>
+          {cell(total)}
+        </td>
+      ))}
+    </tr>
+  );
+}
+
+/** A heading row inside an account (e.g. "Team", "Bills"). */
+function SectionRow({ label, numWeeks, color }: { label: string; numWeeks: number; color: string }) {
+  return (
+    <tr className="bg-white">
+      <td
+        className="sticky-col px-4 pt-3 pb-1 border-b border-border/50 bg-white"
+        style={{ borderLeftColor: color + "60" }}
+      >
+        <span className="text-[11px] font-bold uppercase tracking-wide pl-5" style={{ color }}>
+          {label}
+        </span>
+      </td>
+      <td colSpan={numWeeks} className="border-b border-border/50" />
+    </tr>
+  );
+}
+
+/** Wise - its own account under OpEx (Katie, 16 Oct 2026). OpEx transfers in;
+ *  the regular monthly subscriptions go out, each on its usual day. */
+function WiseBlock({
+  account,
+  rows,
+  bills,
+  open,
+  onToggle,
+  numWeeks,
+}: {
+  account: (typeof ACCOUNT_CONFIGS)[number];
+  rows: WiseWeekRow[];
+  bills: MonthlyBill[];
+  open: boolean;
+  onToggle: () => void;
+  numWeeks: number;
+}) {
+  const wise = { ...account, label: "Wise" };
+  return (
+    <>
+      <tr className="hover:bg-muted/30 transition-colors" style={{ backgroundColor: account.colorHex + "05" }}>
+        <td
+          className="sticky-col px-4 py-2.5 border-b border-border bg-white cursor-pointer select-none"
+          style={{ borderLeft: `3px dashed ${account.colorHex}` }}
+          onClick={onToggle}
+        >
+          <div className="flex items-center gap-2 pl-4">
+            <span className="font-semibold text-sm truncate">Wise</span>
+            {open ? (
+              <ChevronUp className="h-3.5 w-3.5 text-muted-foreground ml-auto shrink-0" />
+            ) : (
+              <ChevronDown className="h-3.5 w-3.5 text-muted-foreground ml-auto shrink-0" />
+            )}
+          </div>
+          <div className="text-xs text-muted-foreground/60 mt-0.5 pl-4">under OpEx - pays the subscriptions</div>
+        </td>
+        {rows.map((r) => (
+          <td
+            key={r.week}
+            className="px-3 py-2.5 text-right border-b border-border font-semibold"
+            style={{ color: r.closing < 0 ? OUT : account.colorHex }}
+          >
+            {formatCurrency(r.closing)}
+          </td>
+        ))}
+      </tr>
+      {open && (
+        <>
+          <DetailRow account={wise} label="Opening" rows={rows} pick={(r) => r.opening} rowType="opening" />
+          <DetailRow account={wise} label="Transfer in from OpEx" rows={rows} pick={(r) => r.transfersIn} rowType="allocation" />
+          <SectionRow label="Bills" numWeeks={numWeeks} color={account.colorHex} />
+          {bills.map((b) => (
+            <DetailRow
+              key={b.id}
+              account={wise}
+              label={b.name}
+              rows={rows}
+              pick={(r) => (r as WiseWeekRow).billLines[b.id] ?? 0}
+              rowType="withdrawal"
+            />
+          ))}
+          {!bills.length && (
+            <tr>
+              <td className="sticky-col px-4 py-2 text-xs text-muted-foreground pl-9 bg-white">No regular bills set</td>
+              <td colSpan={numWeeks} />
+            </tr>
+          )}
+          <DetailRow account={wise} label="Net movement" rows={rows} pick={(r) => r.net} rowType="allocation" />
+          <DetailRow account={wise} label="Closing balance" rows={rows} pick={(r) => r.closing} rowType="closing" isBold />
+        </>
+      )}
+    </>
+  );
+}
+
+/** This business's regular monthly bills, from the helper's file. */
+function useMonthlyBills(): MonthlyBill[] {
+  const [bills, setBills] = useState<MonthlyBill[]>([]);
+  useEffect(() => {
+    let t = "";
+    try {
+      t = localStorage.getItem("kcc-tenant") || localStorage.getItem("pfft-pf-alloc-xero-tenant") || "";
+    } catch {
+      /* ignore */
+    }
+    if (!t) return;
+    fetch(`http://127.0.0.1:8765/api/bills?tenant=${encodeURIComponent(t)}`)
+      .then((r) => r.json())
+      .then((d) => setBills((d?.bills ?? []) as MonthlyBill[]))
+      .catch(() => {
+        /* helper not running */
+      });
+  }, []);
+  return bills;
+}
+
+/** The actual transfers for the business on screen, from the file the helper keeps
+ *  (~/.config/cash-compass/actual_transfers.json) so the dev page and the double-click
+ *  file agree. Re-read when the Allocation Calculator saves new ones, and on focus. */
+function useActualTransfers(): ActualTransfer[] {
+  const [list, setList] = useState<ActualTransfer[]>([]);
+  useEffect(() => {
+    const refresh = () => {
+      let t = "";
+      try {
+        t = localStorage.getItem("kcc-tenant") || localStorage.getItem("pfft-pf-alloc-xero-tenant") || "";
+      } catch {
+        /* ignore */
+      }
+      fetch(`http://127.0.0.1:8765/api/actuals?tenant=${encodeURIComponent(t)}`)
+        .then((r) => r.json())
+        .then((d) => setList((d?.actuals ?? []) as ActualTransfer[]))
+        .catch(() => {
+          /* helper not running - leave the forecast showing */
+        });
+    };
+    refresh();
+    window.addEventListener("storage", refresh); // the calculator pings kcc-actuals-saved
     window.addEventListener("focus", refresh);
     return () => {
       window.removeEventListener("storage", refresh);
@@ -82,13 +315,20 @@ export default function WeeklyTable({
   const toOpen = new Set(weekly.accountsToOpen ?? []);
   const rows = buildWeeks(weekly, numWeeks, override);
   const actuals = useActualTransfers();
+  const [estimates, setEstimate, feePct] = useIncomeEstimates();
+  const monthlyBills = useMonthlyBills();
+  const wiseRows = buildWiseWeeks(weekly, numWeeks, recurringLines, monthlyBills);
+  const [wiseOpen, setWiseOpen] = useState(true);
+  const [teamOpen, setTeamOpen] = useState(false); // Team is a dropdown (Katie, 16 Oct 2026)
   const accountRows = buildAccountWeeks(
     weekly,
     numWeeks,
     allocations,
     override,
     recurringLines,
-    actuals
+    actuals,
+    estimates,
+    feePct
   );
   const hasItems = weekly.items.length > 0 || override > 0;
 
@@ -295,23 +535,71 @@ export default function WeeklyTable({
                     {isExpanded && (
                       <>
                         <DetailRow account={acct} label="Opening" rows={ar} pick={(r) => r.opening} rowType="opening" />
-                        <DetailRow
-                          account={acct}
-                          label={isIncome ? "Income in" : "Allocation in"}
-                          rows={ar}
-                          pick={(r) => r.moneyIn}
-                          rowType="allocation"
-                          compare={!isIncome}
-                        />
+                        {isIncome ? (
+                          <>
+                            <IncomeInRow account={acct} rows={ar} onSet={setEstimate} />
+                            {ar.some((r) => (r.fee ?? 0) > 0) && (
+                              <DetailRow
+                                account={acct}
+                                label={`Stripe fee (${feePct}%)`}
+                                rows={ar}
+                                pick={(r) => r.fee ?? 0}
+                                rowType="withdrawal"
+                              />
+                            )}
+                          </>
+                        ) : (
+                          <DetailRow
+                            account={acct}
+                            label="Allocation in"
+                            rows={ar}
+                            pick={(r) => r.moneyIn}
+                            rowType="allocation"
+                            compare
+                          />
+                        )}
                         {isIncome && ar.some((r) => r.allocOut > 0) && (
                           <DetailRow account={acct} label="Allocated out" rows={ar} pick={(r) => r.allocOut} rowType="withdrawal" compare />
                         )}
+                        {/* One row per line moved in (e.g. PAYG-Katie, Team PAYG into BAS). */}
+                        {recurringLines
+                          .filter((l) => (l.toAccount ?? "") === account.key && l.weeklyAmount > 0)
+                          .map((l) => (
+                            <DetailRow
+                              key={"in-" + l.id}
+                              account={acct}
+                              label={l.inLabel ?? `Moved in: ${l.label}`}
+                              rows={ar}
+                              pick={() => l.weeklyAmount}
+                              rowType="allocation"
+                            />
+                          ))}
                         {ar.some((r) => r.bills > 0) && (
                           <DetailRow account={acct} label="Bills (Xero)" rows={ar} pick={(r) => r.bills} rowType="withdrawal" />
                         )}
-                        {recurringLines
-                          .filter((l) => l.account === account.key)
-                          .map((line) => (
+                        {/* Katie, 16 Oct 2026: team wages, PAYG and super under their own heading. */}
+                        {recurringLines.some((l) => l.account === account.key && l.id.startsWith("team-")) && (
+                          <TeamHeaderRow
+                            numWeeks={numWeeks}
+                            color={acct.colorHex}
+                            open={teamOpen}
+                            onToggle={() => setTeamOpen(!teamOpen)}
+                            total={recurringLines
+                              .filter((l) => l.account === account.key && l.id.startsWith("team-"))
+                              .reduce((t, l) => t + l.weeklyAmount, 0)}
+                          />
+                        )}
+                        {[
+                          ...(teamOpen
+                            ? [
+                                ...recurringLines.filter((l) => l.account === account.key && l.id.startsWith("team-wage")),
+                                ...recurringLines.filter(
+                                  (l) => l.account === account.key && l.id.startsWith("team-") && !l.id.startsWith("team-wage")
+                                ),
+                              ]
+                            : []),
+                          ...recurringLines.filter((l) => l.account === account.key && !l.id.startsWith("team-")),
+                        ].map((line) => (
                             <RecurringRow
                               key={line.id}
                               account={acct}
@@ -323,6 +611,16 @@ export default function WeeklyTable({
                         <DetailRow account={acct} label="Net movement" rows={ar} pick={(r) => r.net} rowType="allocation" />
                         <DetailRow account={acct} label="Closing balance" rows={ar} pick={(r) => r.closing} rowType="closing" isBold />
                       </>
+                    )}
+                    {account.key === "opex" && (
+                      <WiseBlock
+                        account={acct}
+                        rows={wiseRows}
+                        bills={monthlyBills}
+                        open={wiseOpen}
+                        onToggle={() => setWiseOpen(!wiseOpen)}
+                        numWeeks={numWeeks}
+                      />
                     )}
                   </Fragment>
                 );
@@ -475,7 +773,12 @@ function RecurringRow({
         className="sticky-col px-4 py-2 border-b border-border/50 bg-white"
         style={{ borderLeftColor: account.colorHex + "60" }}
       >
-        <span className="text-xs pl-5 text-muted-foreground italic">{line.label}</span>
+        <span className="text-xs pl-5 text-muted-foreground italic">
+          {line.label}
+          {line.toAccount && (
+            <span className="not-italic"> &rarr; {ACCOUNT_CONFIGS.find((a) => a.key === line.toAccount)?.label ?? (line.toAccount === "wise" ? "Wise" : line.toAccount)}</span>
+          )}
+        </span>
       </td>
       {Array.from({ length: numWeeks }, (_, w) => (
         <RecurringCell
@@ -491,9 +794,11 @@ function RecurringRow({
 function RecurringCell({
   value,
   onSet,
+  color = OUT,
 }: {
   value: number;
   onSet: (v: number) => void;
+  color?: string;
 }) {
   const [editing, setEditing] = useState(false);
   if (editing) {
@@ -501,7 +806,7 @@ function RecurringCell({
       <td className="px-1 py-1 border-b border-border/50">
         <input
           autoFocus
-          defaultValue={value ? String(Math.round(value)) : ""}
+          defaultValue={value ? String(Math.round(value * 100) / 100) : ""}
           onBlur={(e) => {
             onSet(parseCurrencyInput(e.target.value));
             setEditing(false);
@@ -517,7 +822,7 @@ function RecurringCell({
   return (
     <td
       className="px-2 py-2 text-right border-b border-border/50 cursor-pointer hover:bg-muted/40"
-      style={{ color: value ? OUT : undefined }}
+      style={{ color: value ? color : undefined }}
       onClick={() => setEditing(true)}
       title="Click to edit"
     >

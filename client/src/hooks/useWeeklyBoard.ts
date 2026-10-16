@@ -3,13 +3,27 @@
 // independent of the monthly PF projection.
 // ============================================================
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   WeeklyData,
   WeeklyItem,
   emptyWeekly,
   DEFAULT_RECURRING,
+  RECURRING_ROUTES,
+  RecurringLine,
 } from "@/lib/weekly";
+
+// Weekly amounts for the recurring lines live in a file on Katie's Mac via the
+// cash-compass helper (per business), so the dev page and the double-click file agree
+// and Claude can enter them (Katie, 16 Oct 2026). Browser storage is the fallback.
+const HELPER = "http://127.0.0.1:8765";
+function currentTenant(): string {
+  try {
+    return localStorage.getItem("kcc-tenant") || localStorage.getItem("pfft-pf-alloc-xero-tenant") || "";
+  } catch {
+    return "";
+  }
+}
 
 const STORAGE_KEY = "pfft-weekly-v1";
 
@@ -18,7 +32,18 @@ function withDefaults(d: WeeklyData): WeeklyData {
   if (!d.recurringLines || d.recurringLines.length === 0) {
     return { ...d, recurringLines: DEFAULT_RECURRING.map((r) => ({ ...r })) };
   }
-  return d;
+  // Lines saved before routing existed pick up where PAYG / super move to,
+  // and any seeded line added since (e.g. Transfer to Wise) is appended.
+  const have = new Set(d.recurringLines.map((r) => r.id));
+  return {
+    ...d,
+    recurringLines: [
+      ...d.recurringLines.map((r) =>
+        r.toAccount || !RECURRING_ROUTES[r.id] ? r : { ...r, toAccount: RECURRING_ROUTES[r.id] }
+      ),
+      ...DEFAULT_RECURRING.filter((r) => !have.has(r.id)).map((r) => ({ ...r })),
+    ],
+  };
 }
 
 function load(): WeeklyData {
@@ -46,6 +71,45 @@ let manualCounter = 0;
 
 export function useWeeklyBoard() {
   const [weekly, setWeeklyState] = useState<WeeklyData>(load);
+
+  // Pull this business's recurring amounts from the helper's file.
+  useEffect(() => {
+    const t = currentTenant();
+    if (!t) return;
+    fetch(`${HELPER}/api/recurring?tenant=${encodeURIComponent(t)}`)
+      .then((r) => r.json())
+      .then((d) => {
+        const amounts: Record<string, number> = d?.amounts ?? {};
+        const labels: Record<string, string> = d?.labels ?? {};
+        // Business-specific lines (e.g. one wage line per team member) and the
+        // seeded lines they replace.
+        const extra: RecurringLine[] = d?.lines ?? [];
+        const hide = new Set<string>(d?.hide ?? []);
+        if (!Object.keys(amounts).length && !Object.keys(labels).length && !extra.length) return;
+        setWeeklyState((prev) => {
+          const next = {
+            ...prev,
+            recurringLines: [
+              ...(prev.recurringLines ?? []).filter((r) => !hide.has(r.id)),
+              ...extra
+                .filter((x) => !(prev.recurringLines ?? []).some((r) => r.id === x.id))
+                .map((x) => ({ ...x, weeklyAmount: 0 })),
+            ].map((r) =>
+              ({
+                ...r,
+                ...(amounts[r.id] !== undefined ? { weeklyAmount: Number(amounts[r.id]) } : {}),
+                ...(labels[r.id] ? { inLabel: labels[r.id] } : {}),
+              })
+            ),
+          };
+          save(next);
+          return next;
+        });
+      })
+      .catch(() => {
+        /* helper not running - keep what the browser has */
+      });
+  }, []);
 
   const update = useCallback((next: WeeklyData) => {
     save(next);
@@ -144,6 +208,15 @@ export function useWeeklyBoard() {
       save(next);
       return next;
     });
+    const t = currentTenant();
+    if (t)
+      fetch(`${HELPER}/api/recurring`, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: JSON.stringify({ tenant: t, id, amount }),
+      }).catch(() => {
+        /* helper not running - the browser copy still holds it */
+      });
   }, []);
 
   const resetWeekly = useCallback(() => update(emptyWeekly()), [update]);

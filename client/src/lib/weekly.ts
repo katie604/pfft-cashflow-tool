@@ -39,16 +39,34 @@ export interface RecurringLine {
   account: string; // PF account key
   label: string;
   weeklyAmount: number;
+  /** Set when the money MOVES into another PF account instead of leaving the
+   *  business - Katie, 16 Oct 2026: owner's PAYG -> BAS, owner's super -> OpEx. */
+  toAccount?: string;
+  /** What it is called in the account it lands in (per business, from the helper). */
+  inLabel?: string;
 }
+
+/** Where a seeded line moves its money to. Also applied to lines saved before
+ *  routing existed, so an existing board picks it up. */
+export const RECURRING_ROUTES: Record<string, string> = {
+  "own-payg": "bas",
+  "own-super": "opex",
+  "team-payg": "bas", // Katie, 16 Oct 2026: team PAYG moves into BAS too
+  "opex-wise": "wise",
+};
 
 /** Seeded payroll lines — owner's pay + team, ready to fill in. */
 export const DEFAULT_RECURRING: RecurringLine[] = [
   { id: "own-net", account: "ownersPay", label: "Net wage", weeklyAmount: 0 },
-  { id: "own-payg", account: "ownersPay", label: "PAYG", weeklyAmount: 0 },
-  { id: "own-super", account: "ownersPay", label: "Super", weeklyAmount: 0 },
+  { id: "own-payg", account: "ownersPay", label: "PAYG", weeklyAmount: 0, toAccount: "bas" },
+  { id: "own-super", account: "ownersPay", label: "Super", weeklyAmount: 0, toAccount: "opex" },
   { id: "team-wage", account: "opex", label: "Team wages", weeklyAmount: 0 },
-  { id: "team-payg", account: "opex", label: "Team PAYG", weeklyAmount: 0 },
+  { id: "team-payg", account: "opex", label: "Team PAYG", weeklyAmount: 0, toAccount: "bas" },
   { id: "team-super", account: "opex", label: "Team Super", weeklyAmount: 0 },
+  // Katie, 16 Oct 2026: a weekly ATO payment (EBS: $1,004.25 every Friday, from OpEx).
+  { id: "opex-ato", account: "opex", label: "ATO payment", weeklyAmount: 0 },
+  // Katie, 16 Oct 2026: OpEx tops up the Wise account, which pays the subscriptions.
+  { id: "opex-wise", account: "opex", label: "Transfer to Wise", weeklyAmount: 0, toAccount: "wise" },
 ];
 
 export interface WeeklyData {
@@ -61,6 +79,8 @@ export interface WeeklyData {
   outByAccount?: AccountWeekOut[];
   /** Opening balance per PF account at week 0. */
   openingByAccount?: Record<string, number>;
+  /** Wise balance(s) at week 0 - Wise sits under OpEx, its own account. */
+  openingWise?: number;
   /** Manual recurring weekly money-out lines (payroll etc.). */
   recurringLines?: RecurringLine[];
   /** PF accounts the client hasn't opened yet (greyed + flagged in the table). */
@@ -97,8 +117,16 @@ function mondayOf(d: Date): Date {
   return x;
 }
 
+/** yyyy-mm-dd from a local date (never toISOString - see thisMondayISO). */
+export function isoLocal(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 export function thisMondayISO(): string {
-  return mondayOf(new Date()).toISOString().slice(0, 10);
+  // Local date, not toISOString(): in Sydney, Monday midnight is still Sunday in UTC,
+  // which started every week on the Sunday (found 16 Oct 2026).
+  const m = mondayOf(new Date());
+  return `${m.getFullYear()}-${String(m.getMonth() + 1).padStart(2, "0")}-${String(m.getDate()).padStart(2, "0")}`;
 }
 
 export function emptyWeekly(): WeeklyData {
@@ -197,6 +225,23 @@ export function weekIndexOf(weekStart: string, iso: string, numWeeks: number): n
   return w >= 0 && w < numWeeks ? w : -1;
 }
 
+/** Split a week's income when a fee comes off first (Katie, 16 Oct 2026):
+ *  GST (BAS %) is worked out on the FULL income, the fee comes off, and only
+ *  what is left is split into Real Revenue accounts. */
+function allocateAfterFee(gross: number, fee: number, alloc: AccountBalances): AccountBalances {
+  if (fee <= 0) return allocateIncome(gross, alloc);
+  const bas = gross * (alloc.bas / 100);
+  const afterFee = gross - fee;
+  const materials = afterFee * (alloc.materials / 100);
+  const realRev = Math.max(0, afterFee - bas - materials);
+  const profit = realRev * (alloc.profit / 100);
+  const ownersPay = realRev * (alloc.ownersPay / 100);
+  const tax = realRev * (alloc.tax / 100);
+  const opex = realRev * (alloc.opex / 100);
+  const income = afterFee - (bas + materials + profit + ownersPay + tax + opex);
+  return { income, bas, materials, profit, ownersPay, tax, opex };
+}
+
 export interface AccountWeekRow {
   week: number;
   weekCommencing: Date;
@@ -206,6 +251,8 @@ export interface AccountWeekRow {
   allocOut: number; // Income only: amount swept out to other accounts
   bills: number; // categorised Xero bills out
   recurring: number; // manual recurring lines out
+  transfersIn: number; // recurring lines moved IN from another account (PAYG, super)
+  fee?: number; // Income only: payment fee taken off before the split (Stripe)
   net: number;
   closing: number;
   /** True when this week's allocation is the ACTUAL transfer, not the forecast. */
@@ -226,7 +273,11 @@ export function buildAccountWeeks(
   allocations: AccountBalances,
   incomeOverride = 0,
   recurringLines: RecurringLine[] = [],
-  actuals: ActualTransfer[] = []
+  actuals: ActualTransfer[] = [],
+  /** Katie's typed estimate of income per week, keyed by the week's Monday. */
+  estimates: Record<string, number> = {},
+  /** % of income a payment provider keeps before the split (EBS: Stripe 25%). */
+  feePct = 0
 ): Record<AccountKey, AccountWeekRow[]> {
   // Actual transfers per week; the week's real dollars REPLACE its forecast
   // allocation (Katie, 16 Oct 2026). Two in one week add together.
@@ -236,6 +287,9 @@ export function buildAccountWeeks(
     if (w < 0) continue;
     const wk = (actualByWeek[w] ??= {});
     for (const [k, v] of Object.entries(a.transfers)) wk[k] = (wk[k] ?? 0) + Number(v || 0);
+    // What actually came into Income that week (Katie, 16 Oct 2026: it was all swept
+    // out, so Income's net movement for the week is zero).
+    wk.__income = (wk.__income ?? 0) + Number(a.income || 0);
   }
   const outMap: Record<number, Partial<Record<string, number>>> = {};
   for (const o of data.outByAccount ?? []) {
@@ -243,8 +297,11 @@ export function buildAccountWeeks(
     wk[o.account] = (wk[o.account] ?? 0) + o.amount;
   }
   const recByAccount: Record<string, number> = {};
+  const recInByAccount: Record<string, number> = {};
   for (const r of recurringLines) {
     recByAccount[r.account] = (recByAccount[r.account] ?? 0) + r.weeklyAmount;
+    const to = r.toAccount ?? RECURRING_ROUTES[r.id];
+    if (to) recInByAccount[to] = (recInByAccount[to] ?? 0) + r.weeklyAmount;
   }
 
   const grossByWeek: Record<number, number> = {};
@@ -258,14 +315,23 @@ export function buildAccountWeeks(
 
   const running: Record<string, number> = {};
   for (const k of ACCOUNT_KEYS) running[k] = data.openingByAccount?.[k] ?? 0;
+  // Income always opens at $0 - it is swept to zero every week (Katie, 16 Oct 2026),
+  // whatever Xero's book balance says.
+  running.income = 0;
 
   const out = {} as Record<AccountKey, AccountWeekRow[]>;
   for (const k of ACCOUNT_KEYS) out[k] = [];
 
   for (let w = 0; w < numWeeks; w++) {
-    const gross = grossByWeek[w] ?? 0;
-    const alloc = allocateIncome(gross, allocations); // per-account inflow (forecast)
+    // A typed estimate for the week wins over invoices / the flat assumption
+    // (Katie, 16 Oct 2026). An actual week still uses what actually came in.
+    const est = estimates[isoLocal(weekCommencing(data.weekStart, w))];
+    const gross = est !== undefined ? est : grossByWeek[w] ?? 0;
     const act = actualByWeek[w];
+    // Katie, 16 Oct 2026: the Stripe fee comes off first and only what is left is
+    // split. Not on an actual week - that payout already had the fee taken.
+    const fee = act ? 0 : Math.round(gross * (feePct / 100) * 100) / 100;
+    const alloc = allocateAfterFee(gross, fee, allocations); // per-account inflow (forecast)
     const sumOut = (src: Partial<Record<string, number>>) =>
       ACCOUNT_KEYS.reduce((s, k) => (k === "income" ? s : s + (src[k] ?? 0)), 0);
     const expectedOut = sumOut(alloc);
@@ -273,12 +339,22 @@ export function buildAccountWeeks(
     const allocOutTotal = act ? sumOut(act) : expectedOut;
     for (const k of ACCOUNT_KEYS) {
       const opening = running[k];
-      const moneyIn = k === "income" ? gross : act ? act[k] ?? 0 : alloc[k];
+      const moneyIn =
+        k === "income"
+          ? act && act.__income
+            ? act.__income
+            : gross
+          : act
+          ? act[k] ?? 0
+          : alloc[k];
       const bills = outMap[w]?.[k] ?? 0;
       const recurring = recByAccount[k] ?? 0;
       const allocOut = k === "income" ? allocOutTotal : 0;
-      const moneyOut = bills + recurring + allocOut;
-      const closing = opening + moneyIn - moneyOut;
+      const feeOut = k === "income" ? fee : 0;
+      const moneyOut = bills + recurring + allocOut + feeOut;
+      // Round to the cent so a fully swept week shows $0, not "($0)" from float dust.
+      const transfersIn = recInByAccount[k] ?? 0;
+      const closing = Math.round((opening + moneyIn + transfersIn - moneyOut) * 100) / 100;
       out[k].push({
         week: w,
         weekCommencing: weekCommencing(data.weekStart, w),
@@ -288,13 +364,88 @@ export function buildAccountWeeks(
         allocOut,
         bills,
         recurring,
-        net: moneyIn - moneyOut,
+        transfersIn,
+        net: Math.round((moneyIn + transfersIn - moneyOut) * 100) / 100,
         closing,
         actual: !!act,
+        fee: feeOut,
         expected: k === "income" ? expectedOut : alloc[k],
       });
       running[k] = closing;
     }
   }
   return out;
+}
+
+
+// ── Wise (under OpEx) ──
+// Katie, 16 Oct 2026: OpEx transfers money into Wise, and the regular monthly
+// subscriptions are paid out of Wise. Its own ledger, shown under OpEx.
+
+/** A regular monthly bill paid from Wise, on its usual day of the month. */
+export interface MonthlyBill {
+  id: string;
+  name: string;
+  amount: number;
+  day: number; // day of month; a 31 lands on the last day of shorter months
+}
+
+export interface WiseWeekRow extends AccountWeekRow {
+  billLines: Record<string, number>;
+}
+
+/** Amount of a monthly bill falling in the 7 days from weekStart. */
+function billInWeek(b: MonthlyBill, wkStart: Date): number {
+  let total = 0;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(wkStart);
+    d.setDate(d.getDate() + i);
+    if (d < today) continue; // already gone out this week - not still to pay (16 Oct 2026)
+    const last = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+    if (d.getDate() === Math.min(b.day, last)) total += b.amount;
+  }
+  return total;
+}
+
+export function buildWiseWeeks(
+  data: WeeklyData,
+  numWeeks: number,
+  recurringLines: RecurringLine[],
+  bills: MonthlyBill[]
+): WiseWeekRow[] {
+  const transferIn = recurringLines
+    .filter((r) => (r.toAccount ?? RECURRING_ROUTES[r.id]) === "wise")
+    .reduce((s, r) => s + r.weeklyAmount, 0);
+  const rows: WiseWeekRow[] = [];
+  let running = data.openingWise ?? 0;
+  for (let w = 0; w < numWeeks; w++) {
+    const wc = weekCommencing(data.weekStart, w);
+    const billLines: Record<string, number> = {};
+    let out = 0;
+    for (const b of bills) {
+      const a = billInWeek(b, wc);
+      billLines[b.id] = a;
+      out += a;
+    }
+    const opening = running;
+    const closing = Math.round((opening + transferIn - out) * 100) / 100;
+    rows.push({
+      week: w,
+      weekCommencing: wc,
+      opening,
+      moneyIn: 0,
+      moneyOut: out,
+      allocOut: 0,
+      bills: out,
+      recurring: 0,
+      transfersIn: transferIn,
+      net: Math.round((transferIn - out) * 100) / 100,
+      closing,
+      billLines,
+    });
+    running = closing;
+  }
+  return rows;
 }

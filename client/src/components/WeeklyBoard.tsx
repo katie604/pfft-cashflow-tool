@@ -352,7 +352,7 @@ function Card({
             <input
               autoFocus
               type="text"
-              defaultValue={String(Math.round(item.amount))}
+              defaultValue={String(Math.round(item.amount * 100) / 100)}
               onBlur={(e) => {
                 onAmount(parseCurrencyInput(e.target.value));
                 setEditingAmt(false);
@@ -483,7 +483,7 @@ function EditableCash({ value, onChange }: { value: number; onChange: (v: number
       <input
         autoFocus
         type="text"
-        defaultValue={String(Math.round(value))}
+        defaultValue={String(Math.round(value * 100) / 100)}
         onBlur={(e) => {
           onChange(parseCurrencyInput(e.target.value));
           setEditing(false);
