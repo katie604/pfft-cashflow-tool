@@ -44,6 +44,9 @@ export interface RecurringLine {
   toAccount?: string;
   /** What it is called in the account it lands in (per business, from the helper). */
   inLabel?: string;
+  /** Show this out-line straight under the moved-in row of that line (Katie,
+   *  16 Oct 2026: her super comes into OpEx and goes straight back out). */
+  afterId?: string;
 }
 
 /** Where a seeded line moves its money to. Also applied to lines saved before
@@ -242,6 +245,16 @@ function allocateAfterFee(gross: number, fee: number, alloc: AccountBalances): A
   return { income, bas, materials, profit, ownersPay, tax, opex };
 }
 
+/** This week's real starting point (Katie, 16 Oct 2026): the bank balance right
+ *  now, and only the payments still to go. Everything else this week already
+ *  happened and is inside that balance. */
+export interface NowBalances {
+  week: string; // the Monday this applies to
+  balances: Record<string, number>;
+  remaining: Record<string, Record<string, number>>; // account -> line id -> amount still to go
+  toOpen?: string[]; // PF accounts the business does not have yet (EBS: no Tax account)
+}
+
 export interface AccountWeekRow {
   week: number;
   weekCommencing: Date;
@@ -255,6 +268,8 @@ export interface AccountWeekRow {
   fee?: number; // Income only: payment fee taken off before the split (Stripe)
   net: number;
   closing: number;
+  /** This week, started from the bank balance now with only what is still to go. */
+  stillToGo?: boolean;
   /** True when this week's allocation is the ACTUAL transfer, not the forecast. */
   actual?: boolean;
   /** What the forecast said would come in (or, for Income, be swept out). */
@@ -277,7 +292,8 @@ export function buildAccountWeeks(
   /** Katie's typed estimate of income per week, keyed by the week's Monday. */
   estimates: Record<string, number> = {},
   /** % of income a payment provider keeps before the split (EBS: Stripe 25%). */
-  feePct = 0
+  feePct = 0,
+  now: NowBalances | null = null
 ): Record<AccountKey, AccountWeekRow[]> {
   // Actual transfers per week; the week's real dollars REPLACE its forecast
   // allocation (Katie, 16 Oct 2026). Two in one week add together.
@@ -337,7 +353,30 @@ export function buildAccountWeeks(
     const expectedOut = sumOut(alloc);
     // Total swept out of Income = everything allocated to the other accounts.
     const allocOutTotal = act ? sumOut(act) : expectedOut;
+    const isNowWeek = !!now && now.week === isoLocal(weekCommencing(data.weekStart, w));
     for (const k of ACCOUNT_KEYS) {
+      if (isNowWeek && now!.balances[k] !== undefined) {
+        const opening = now!.balances[k];
+        const togo = Object.values(now!.remaining[k] ?? {}).reduce((s2, v) => s2 + Number(v || 0), 0);
+        const closing = Math.round((opening - togo) * 100) / 100;
+        out[k].push({
+          week: w,
+          weekCommencing: weekCommencing(data.weekStart, w),
+          opening,
+          moneyIn: 0,
+          moneyOut: togo,
+          allocOut: 0,
+          bills: 0,
+          recurring: togo,
+          transfersIn: 0,
+          net: Math.round(-togo * 100) / 100,
+          closing,
+          stillToGo: true,
+          fee: 0,
+        });
+        running[k] = closing;
+        continue;
+      }
       const opening = running[k];
       const moneyIn =
         k === "income"
@@ -413,7 +452,8 @@ export function buildWiseWeeks(
   data: WeeklyData,
   numWeeks: number,
   recurringLines: RecurringLine[],
-  bills: MonthlyBill[]
+  bills: MonthlyBill[],
+  now: NowBalances | null = null
 ): WiseWeekRow[] {
   const transferIn = recurringLines
     .filter((r) => (r.toAccount ?? RECURRING_ROUTES[r.id]) === "wise")
@@ -429,8 +469,16 @@ export function buildWiseWeeks(
       billLines[b.id] = a;
       out += a;
     }
-    const opening = running;
-    const closing = Math.round((opening + transferIn - out) * 100) / 100;
+    // This week starts from the Wise bank balance now, if Katie has given it, and
+    // only a transfer still to go is added (one already made is in the balance).
+    const isNow = !!now && now.balances.wise !== undefined && now.week === isoLocal(wc);
+    const opening = isNow ? now!.balances.wise : running;
+    const tin = isNow
+      ? recurringLines
+          .filter((r) => (r.toAccount ?? RECURRING_ROUTES[r.id]) === "wise")
+          .reduce((s2, r) => s2 + Number(now!.remaining[r.account]?.[r.id] ?? 0), 0)
+      : transferIn;
+    const closing = Math.round((opening + tin - out) * 100) / 100;
     rows.push({
       week: w,
       weekCommencing: wc,
@@ -440,8 +488,8 @@ export function buildWiseWeeks(
       allocOut: 0,
       bills: out,
       recurring: 0,
-      transfersIn: transferIn,
-      net: Math.round((transferIn - out) * 100) / 100,
+      transfersIn: tin,
+      net: Math.round((tin - out) * 100) / 100,
       closing,
       billLines,
     });

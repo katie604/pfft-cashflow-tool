@@ -16,12 +16,14 @@ import {
   WiseWeekRow,
   buildWiseWeeks,
   isoLocal,
+  NowBalances,
   buildWeeks,
   buildAccountWeeks,
 } from "@/lib/weekly";
 import {
   formatCurrency,
   ACCOUNT_CONFIGS,
+  ACCOUNT_KEYS,
   AccountKey,
   AccountBalances,
 } from "@/lib/cashflow";
@@ -76,9 +78,15 @@ function IncomeInRow({
 }
 
 /** Katie's per-week income estimates, from the helper's file. */
-function useIncomeEstimates(): [Record<string, number>, (weekIso: string, amount: number) => void, number] {
+function useIncomeEstimates(): [
+  Record<string, number>,
+  (weekIso: string, amount: number) => void,
+  number,
+  NowBalances | null,
+] {
   const [est, setEst] = useState<Record<string, number>>({});
   const [feePct, setFeePct] = useState(0);
+  const [nowBal, setNowBal] = useState<NowBalances | null>(null);
   const tenant = () => {
     try {
       return localStorage.getItem("kcc-tenant") || localStorage.getItem("pfft-pf-alloc-xero-tenant") || "";
@@ -94,6 +102,7 @@ function useIncomeEstimates(): [Record<string, number>, (weekIso: string, amount
       .then((d) => {
         setEst(d?.income ?? {});
         setFeePct(Number(d?.feePct ?? 0));
+        setNowBal((d?.now ?? null) as NowBalances | null);
       })
       .catch(() => {
         /* helper not running */
@@ -116,7 +125,7 @@ function useIncomeEstimates(): [Record<string, number>, (weekIso: string, amount
         /* helper not running */
       });
   };
-  return [est, save, feePct];
+  return [est, save, feePct, nowBal];
 }
 
 /** The Team heading: a dropdown showing the weekly team total, click to open. */
@@ -125,13 +134,13 @@ function TeamHeaderRow({
   color,
   open,
   onToggle,
-  total,
+  totalFor,
 }: {
   numWeeks: number;
   color: string;
   open: boolean;
   onToggle: () => void;
-  total: number;
+  totalFor: (week: number) => number;
 }) {
   return (
     <tr className="bg-white hover:bg-muted/40 cursor-pointer" onClick={onToggle}>
@@ -143,7 +152,7 @@ function TeamHeaderRow({
       </td>
       {Array.from({ length: numWeeks }, (_, w) => (
         <td key={w} className="px-2 py-2 text-right border-b border-border/50 font-semibold" style={{ color: OUT }}>
-          {cell(total)}
+          {cell(totalFor(w))}
         </td>
       ))}
     </tr>
@@ -216,7 +225,7 @@ function WiseBlock({
       {open && (
         <>
           <DetailRow account={wise} label="Opening" rows={rows} pick={(r) => r.opening} rowType="opening" />
-          <DetailRow account={wise} label="Transfer in from OpEx" rows={rows} pick={(r) => r.transfersIn} rowType="allocation" />
+          <DetailRow account={wise} label="Moved in: OpEx" rows={rows} pick={(r) => r.transfersIn} rowType="allocation" />
           <SectionRow label="Bills" numWeeks={numWeeks} color={account.colorHex} />
           {bills.map((b) => (
             <DetailRow
@@ -312,12 +321,19 @@ export default function WeeklyTable({
 
   const override = weekly.incomeOverride ?? 0;
   const recurringLines = weekly.recurringLines ?? [];
-  const toOpen = new Set(weekly.accountsToOpen ?? []);
+  const [estimates, setEstimate, feePct, nowBal] = useIncomeEstimates();
+  const toOpen = new Set([...(weekly.accountsToOpen ?? []), ...(nowBal?.toOpen ?? [])]);
   const rows = buildWeeks(weekly, numWeeks, override);
   const actuals = useActualTransfers();
-  const [estimates, setEstimate, feePct] = useIncomeEstimates();
+  // In the "still to go" week a line shows what is left to pay, or "paid".
+  const paidWeeks = (ar: AccountWeekRow[], acctKey: string, lineId: string) => {
+    const w0 = ar.find((r) => r.stillToGo);
+    if (!w0 || !nowBal) return undefined;
+    const rem = nowBal.remaining[acctKey] ?? {};
+    return { [w0.week]: rem[lineId] !== undefined ? Number(rem[lineId]) : null } as Record<number, number | null>;
+  };
   const monthlyBills = useMonthlyBills();
-  const wiseRows = buildWiseWeeks(weekly, numWeeks, recurringLines, monthlyBills);
+  const wiseRows = buildWiseWeeks(weekly, numWeeks, recurringLines, monthlyBills, nowBal);
   const [wiseOpen, setWiseOpen] = useState(true);
   const [teamOpen, setTeamOpen] = useState(false); // Team is a dropdown (Katie, 16 Oct 2026)
   const accountRows = buildAccountWeeks(
@@ -328,9 +344,28 @@ export default function WeeklyTable({
     recurringLines,
     actuals,
     estimates,
-    feePct
+    feePct,
+    nowBal
   );
   const hasItems = weekly.items.length > 0 || override > 0;
+  // Katie, 16 Oct 2026: balances and running totals all calculate off the accounts
+  // (and Wise). Money in = new income; money out = what actually leaves the
+  // business. Moves between her own accounts (PAYG, super, Wise) net to zero.
+  let cumIn = 0;
+  let cumOut = 0;
+  const totals: WeekRow[] = rows.map((base, w) => {
+    const all = ACCOUNT_KEYS.map((k) => accountRows[k][w]);
+    const wr = wiseRows[w];
+    const opening = Math.round((all.reduce((t, r) => t + r.opening, 0) + (wr?.opening ?? 0)) * 100) / 100;
+    const closing = Math.round((all.reduce((t, r) => t + r.closing, 0) + (wr?.closing ?? 0)) * 100) / 100;
+    const net = Math.round((closing - opening) * 100) / 100;
+    // In the "still to go" week the income is already inside the bank balances.
+    const moneyIn = all.some((r) => r.stillToGo) ? 0 : accountRows.income[w].moneyIn;
+    const moneyOut = Math.round((moneyIn - net) * 100) / 100;
+    cumIn += moneyIn;
+    cumOut += moneyOut;
+    return { ...base, opening, closing, net, moneyIn, moneyOut, cumulativeIn: cumIn, cumulativeOut: cumOut };
+  });
 
   const toggle = (k: AccountKey) =>
     setExpanded((prev) => {
@@ -565,14 +600,21 @@ export default function WeeklyTable({
                         {recurringLines
                           .filter((l) => (l.toAccount ?? "") === account.key && l.weeklyAmount > 0)
                           .map((l) => (
-                            <DetailRow
-                              key={"in-" + l.id}
-                              account={acct}
-                              label={l.inLabel ?? `Moved in: ${l.label}`}
-                              rows={ar}
-                              pick={() => l.weeklyAmount}
-                              rowType="allocation"
-                            />
+                            <Fragment key={"in-" + l.id}>
+                              <DetailRow
+                                account={acct}
+                                label={l.inLabel ?? `Moved in: ${l.label}`}
+                                rows={ar}
+                                pick={(r) => (r.stillToGo ? 0 : l.weeklyAmount)}
+                                rowType="allocation"
+                              />
+                              {recurringLines
+                                .filter((o) => o.afterId === l.id && o.account === account.key)
+                                .map((o) => (
+                                  <RecurringRow key={o.id} account={acct} line={o} numWeeks={numWeeks} onSet={onSetRecurring}
+                                    paid={paidWeeks(ar, account.key, o.id)} />
+                                ))}
+                            </Fragment>
                           ))}
                         {ar.some((r) => r.bills > 0) && (
                           <DetailRow account={acct} label="Bills (Xero)" rows={ar} pick={(r) => r.bills} rowType="withdrawal" />
@@ -584,9 +626,15 @@ export default function WeeklyTable({
                             color={acct.colorHex}
                             open={teamOpen}
                             onToggle={() => setTeamOpen(!teamOpen)}
-                            total={recurringLines
-                              .filter((l) => l.account === account.key && l.id.startsWith("team-"))
-                              .reduce((t, l) => t + l.weeklyAmount, 0)}
+                            totalFor={(w) => {
+                              const team = recurringLines.filter((l) => l.account === account.key && l.id.startsWith("team-"));
+                              const r = ar[w];
+                              if (r?.stillToGo && nowBal) {
+                                const rem = nowBal.remaining[account.key] ?? {};
+                                return team.reduce((t, l) => t + Number(rem[l.id] ?? 0), 0);
+                              }
+                              return team.reduce((t, l) => t + l.weeklyAmount, 0);
+                            }}
                           />
                         )}
                         {[
@@ -598,7 +646,7 @@ export default function WeeklyTable({
                                 ),
                               ]
                             : []),
-                          ...recurringLines.filter((l) => l.account === account.key && !l.id.startsWith("team-")),
+                          ...recurringLines.filter((l) => l.account === account.key && !l.id.startsWith("team-") && !l.afterId),
                         ].map((line) => (
                             <RecurringRow
                               key={line.id}
@@ -606,6 +654,7 @@ export default function WeeklyTable({
                               line={line}
                               numWeeks={numWeeks}
                               onSet={onSetRecurring}
+                              paid={paidWeeks(ar, account.key, line.id)}
                             />
                           ))}
                         <DetailRow account={acct} label="Net movement" rows={ar} pick={(r) => r.net} rowType="allocation" />
@@ -627,7 +676,7 @@ export default function WeeklyTable({
               })}
               <TotalRow
                 label="Total Cash"
-                rows={rows}
+                rows={totals}
                 pick={(r) => r.closing}
                 color={NAVY}
                 bold
@@ -636,11 +685,11 @@ export default function WeeklyTable({
               </>
             ) : (
               <>
-                <TotalRow label="Opening" rows={rows} pick={(r) => r.opening} color={NAVY} />
-                <TotalRow label="Money in" rows={rows} pick={(r) => r.moneyIn} color={IN} />
-                <TotalRow label="Money out" rows={rows} pick={(r) => r.moneyOut} color={OUT} />
-                <TotalRow label="Net movement" rows={rows} pick={(r) => r.net} color={NAVY} signed />
-                <TotalRow label="Closing balance" rows={rows} pick={(r) => r.closing} color={NAVY} bold dangerNegative />
+                <TotalRow label="Opening" rows={totals} pick={(r) => r.opening} color={NAVY} />
+                <TotalRow label="Money in" rows={totals} pick={(r) => r.moneyIn} color={IN} />
+                <TotalRow label="Money out" rows={totals} pick={(r) => r.moneyOut} color={OUT} />
+                <TotalRow label="Net movement" rows={totals} pick={(r) => r.net} color={NAVY} signed />
+                <TotalRow label="Closing balance" rows={totals} pick={(r) => r.closing} color={NAVY} bold dangerNegative />
               </>
             )}
           </tbody>
@@ -761,11 +810,14 @@ function RecurringRow({
   line,
   numWeeks,
   onSet,
+  paid,
 }: {
   account: (typeof ACCOUNT_CONFIGS)[number];
   line: RecurringLine;
   numWeeks: number;
   onSet: (id: string, amount: number) => void;
+  /** week -> amount still to go, or null = already paid that week. */
+  paid?: Record<number, number | null>;
 }) {
   return (
     <tr className="bg-white hover:bg-muted/40 transition-colors">
@@ -775,18 +827,22 @@ function RecurringRow({
       >
         <span className="text-xs pl-5 text-muted-foreground italic">
           {line.label}
-          {line.toAccount && (
+          {line.toAccount && !(line.toAccount === "wise" && /wise/i.test(line.label)) && (
             <span className="not-italic"> &rarr; {ACCOUNT_CONFIGS.find((a) => a.key === line.toAccount)?.label ?? (line.toAccount === "wise" ? "Wise" : line.toAccount)}</span>
           )}
         </span>
       </td>
-      {Array.from({ length: numWeeks }, (_, w) => (
-        <RecurringCell
-          key={w}
-          value={line.weeklyAmount}
-          onSet={(v) => onSet(line.id, v)}
-        />
-      ))}
+      {Array.from({ length: numWeeks }, (_, w) =>
+        paid && w in paid ? (
+          <td key={w} className="px-2 py-2 text-right border-b border-border/50 text-xs"
+              style={{ color: paid[w] === null ? GREY : OUT }}
+              title={paid[w] === null ? "Already gone out this week" : "Still to go this week"}>
+            {paid[w] === null ? "paid" : cell(paid[w] as number)}
+          </td>
+        ) : (
+          <RecurringCell key={w} value={line.weeklyAmount} onSet={(v) => onSet(line.id, v)} />
+        )
+      )}
     </tr>
   );
 }

@@ -85,6 +85,8 @@ export function useWeeklyBoard() {
         // seeded lines they replace.
         const extra: RecurringLine[] = d?.lines ?? [];
         const hide = new Set<string>(d?.hide ?? []);
+        // Katie, 16 Oct 2026: any move between accounts reads "Moved out: <what> <who>".
+        const rename: Record<string, string> = d?.rename ?? {};
         if (!Object.keys(amounts).length && !Object.keys(labels).length && !extra.length) return;
         setWeeklyState((prev) => {
           const next = {
@@ -99,6 +101,7 @@ export function useWeeklyBoard() {
                 ...r,
                 ...(amounts[r.id] !== undefined ? { weeklyAmount: Number(amounts[r.id]) } : {}),
                 ...(labels[r.id] ? { inLabel: labels[r.id] } : {}),
+                ...(rename[r.id] ? { label: rename[r.id] } : {}),
               })
             ),
           };
