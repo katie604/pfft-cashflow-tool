@@ -6,10 +6,12 @@
 
 import { AccountWeekRow, BasPayment, weekCommencing } from "@/lib/weekly";
 
-export type Period = "weekly" | "monthly" | "2-monthly" | "3-monthly";
+export type Period = "weekly" | "fortnightly" | "monthly" | "2-monthly" | "3-monthly";
 
 export const PERIODS: { key: Period; label: string; months: number }[] = [
   { key: "weekly", label: "Weekly", months: 0 },
+  // Katie, 16 Oct 2026: "default it to show biweekly" - every 2 weeks.
+  { key: "fortnightly", label: "Fortnightly", months: 0 },
   { key: "monthly", label: "Monthly", months: 1 },
   { key: "2-monthly", label: "2-monthly", months: 2 },
   { key: "3-monthly", label: "3-monthly", months: 3 },
@@ -40,7 +42,8 @@ export function groupWeeks(weekStart: string, numWeeks: number, period: Period) 
   for (let w = 0; w < numWeeks; w++) {
     const wc = weekCommencing(weekStart, w);
     let g: number;
-    if (!months) g = w;
+    if (period === "fortnightly") g = Math.floor(w / 2);
+    else if (!months) g = w;
     else g = Math.floor((wc.getFullYear() * 12 + wc.getMonth() - firstIdx) / months);
     groupOf.push(g);
     if (labels[g] === undefined) {

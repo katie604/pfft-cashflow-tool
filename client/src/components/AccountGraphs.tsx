@@ -57,7 +57,7 @@ interface AccountGraphsProps {
 }
 
 export default function AccountGraphs({ settings, weekly }: AccountGraphsProps) {
-  const [period, setPeriod] = useState<Period>("monthly");
+  const [period, setPeriod] = useState<Period>("fortnightly"); // Katie, 16 Oct 2026
   const [basPayments] = useBasPayments();
   const [estimates, , feePct, nowBal] = useIncomeEstimates();
   const actuals = useActualTransfers();

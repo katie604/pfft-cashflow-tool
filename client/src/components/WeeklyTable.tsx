@@ -99,15 +99,24 @@ function IncomeInRow({
   );
 }
 
+/** One fee taken off the income before the split (Katie, 16 Oct 2026: Stripe fee,
+ *  then the Ignition fee under it). */
+export interface IncomeFee {
+  label: string;
+  pct: number;
+}
+
 /** Katie's per-week income estimates, from the helper's file. */
 export function useIncomeEstimates(): [
   Record<string, number>,
   (weekIso: string, amount: number) => void,
   number,
   NowBalances | null,
+  IncomeFee[],
 ] {
   const [est, setEst] = useState<Record<string, number>>({});
   const [feePct, setFeePct] = useState(0);
+  const [fees, setFees] = useState<IncomeFee[]>([]);
   const [nowBal, setNowBal] = useState<NowBalances | null>(null);
   const tenant = () => {
     try {
@@ -124,6 +133,7 @@ export function useIncomeEstimates(): [
       .then((d) => {
         setEst(d?.income ?? {});
         setFeePct(Number(d?.feePct ?? 0));
+        setFees((d?.fees ?? []) as IncomeFee[]);
         setNowBal((d?.now ?? null) as NowBalances | null);
       })
       .catch(() => {
@@ -147,7 +157,7 @@ export function useIncomeEstimates(): [
         /* helper not running */
       });
   };
-  return [est, save, feePct, nowBal];
+  return [est, save, feePct, nowBal, fees];
 }
 
 /** The Team heading: a dropdown showing the weekly team total, click to open. */
@@ -331,11 +341,13 @@ function BasDueEditor({
   color,
   payments,
   onSave,
+  status,
 }: {
   numWeeks: number;
   color: string;
   payments: BasPayment[];
   onSave: (next: BasPayment[]) => void;
+  status: string;
 }) {
   // Katie, 16 Oct 2026: an amount typed and then Enter / a tab switch never saved,
   // because it only saved when the box lost focus. Now it saves as you type.
@@ -355,6 +367,11 @@ function BasDueEditor({
       <td colSpan={numWeeks + 1} className="px-4 py-2 border-b border-border/50" style={{ borderLeft: `3px solid ${color}60` }}>
         <div className="pl-5 text-[11px] text-muted-foreground mb-1.5">
           BAS due dates and amounts - type the amount once you know it
+          {status && (
+            <span className="bas-status ml-2 font-semibold" style={{ color: status.startsWith("NOT") ? OUT : status.startsWith("Saved") ? IN : NAVY }}>
+              {status}
+            </span>
+          )}
         </div>
         <div className="pl-5 flex flex-wrap gap-3">
           {payments.map((p) => (
@@ -400,9 +417,10 @@ function BasDueEditor({
               const d = new Date();
               onSave([...payments, { id: `bas-${Date.now()}`, label: "", due: isoLocal(d), amount: 0 }]);
             }}
-            className="text-xs text-primary hover:underline"
+            className="bas-add px-3 py-1 rounded-md text-xs font-semibold text-white shadow-sm"
+            style={{ backgroundColor: NAVY }}
           >
-            + add a BAS payment
+            + Add a BAS payment
           </button>
         </div>
       </td>
@@ -442,7 +460,7 @@ export default function WeeklyTable({
 
   const override = weekly.incomeOverride ?? 0;
   const recurringLines = weekly.recurringLines ?? [];
-  const [realEstimates, setEstimate, feePct, nowBal] = useIncomeEstimates();
+  const [realEstimates, setEstimate, feePct, nowBal, incomeFees] = useIncomeEstimates();
   // On the What-If, the week's income = the play weekly figure (or the real
   // estimate, or the invoices) plus any one-off income added there.
   let estimates = realEstimates;
@@ -470,7 +488,7 @@ export default function WeeklyTable({
     return { [w0.week]: rem[lineId] !== undefined ? Number(rem[lineId]) : null } as Record<number, number | null>;
   };
   const monthlyBills = useMonthlyBills();
-  const [basPayments, saveBasPayments] = useBasPayments();
+  const [basPayments, saveBasPayments, basStatus] = useBasPayments();
   const wiseRows = buildWiseWeeks(weekly, numWeeks, recurringLines, monthlyBills, nowBal);
   const [wiseOpen, setWiseOpen] = useState(true);
   const [teamOpen, setTeamOpen] = useState(false); // Team is a dropdown (Katie, 16 Oct 2026)
@@ -749,15 +767,36 @@ export default function WeeklyTable({
                             {whatIfIncome.map((it) => (
                               <WhatIfRow key={it.id} account={acct} item={it} numWeeks={numWeeks} onDelete={() => whatIf!.deleteItem(it.id)} />
                             ))}
-                            {ar.some((r) => (r.fee ?? 0) > 0) && (
-                              <DetailRow
-                                account={acct}
-                                label={`Stripe fee (${feePct}%)`}
-                                rows={ar}
-                                pick={(r) => r.fee ?? 0}
-                                rowType="withdrawal"
-                              />
-                            )}
+                            {ar.some((r) => (r.fee ?? 0) > 0) &&
+                              (incomeFees.length > 1 ? (
+                                // One row per fee, in order. Each is its % of the full income; the
+                                // last row takes the cents left so the rows add up to the fee exactly.
+                                incomeFees.map((f, i) => (
+                                  <DetailRow
+                                    key={f.label}
+                                    account={acct}
+                                    label={`${f.label} (${f.pct}%)`}
+                                    rows={ar}
+                                    pick={(r) => {
+                                      const fee = r.fee ?? 0;
+                                      if (!fee) return 0;
+                                      const part = (x: IncomeFee) => Math.round(r.moneyIn * x.pct) / 100;
+                                      if (i < incomeFees.length - 1) return part(f);
+                                      const before = incomeFees.slice(0, -1).reduce((t, x) => t + part(x), 0);
+                                      return Math.round((fee - before) * 100) / 100;
+                                    }}
+                                    rowType="withdrawal"
+                                  />
+                                ))
+                              ) : (
+                                <DetailRow
+                                  account={acct}
+                                  label={`${incomeFees[0]?.label ?? "Stripe fee"} (${feePct}%)`}
+                                  rows={ar}
+                                  pick={(r) => r.fee ?? 0}
+                                  rowType="withdrawal"
+                                />
+                              ))}
                           </>
                         ) : (
                           <DetailRow
@@ -799,7 +838,7 @@ export default function WeeklyTable({
                           <>
                             <DetailRow account={acct} label="Paid to ATO (BAS)" rows={ar} pick={(r) => r.basPaid ?? 0} rowType="withdrawal" />
                             {!isWhatIf && (
-                              <BasDueEditor numWeeks={numWeeks} color={acct.colorHex} payments={basPayments} onSave={saveBasPayments} />
+                              <BasDueEditor numWeeks={numWeeks} color={acct.colorHex} payments={basPayments} onSave={saveBasPayments} status={basStatus} />
                             )}
                           </>
                         )}

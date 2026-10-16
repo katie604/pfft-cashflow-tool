@@ -19,8 +19,11 @@ function currentTenant(): string {
   }
 }
 
-export function useBasPayments(): [BasPayment[], (next: BasPayment[]) => void] {
+export function useBasPayments(): [BasPayment[], (next: BasPayment[]) => void, string] {
   const [payments, setPayments] = useState<BasPayment[]>([]);
+  // Katie, 16 Oct 2026: a save that failed looked exactly like one that worked.
+  // Now every save says what happened.
+  const [status, setStatus] = useState("");
 
   useEffect(() => {
     const t = currentTenant();
@@ -37,15 +40,26 @@ export function useBasPayments(): [BasPayment[], (next: BasPayment[]) => void] {
     const sorted = [...next].sort((a, b) => a.due.localeCompare(b.due));
     setPayments(sorted);
     const t = currentTenant();
-    if (t)
-      fetch(`${HELPER}/api/bas`, {
-        method: "POST",
-        headers: { "Content-Type": "text/plain" },
-        body: JSON.stringify({ tenant: t, payments: sorted }),
-      }).catch(() => {
-        /* helper not running */
-      });
+    if (!t) {
+      setStatus("NOT saved: no business picked on this page");
+      return;
+    }
+    setStatus("Saving...");
+    fetch(`${HELPER}/api/bas`, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: JSON.stringify({ tenant: t, payments: sorted }),
+    })
+      .then(async (r) => {
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || !d?.ok) throw new Error(d?.error || `helper said ${r.status}`);
+        const q = sorted.map((p) => p.amount);
+        const back = (d.payments as BasPayment[]).map((p) => p.amount);
+        if (JSON.stringify(q) !== JSON.stringify(back)) throw new Error("saved, but it read back different");
+        setStatus(`Saved ✓ ${new Date().toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit", second: "2-digit" })}`);
+      })
+      .catch((e) => setStatus(`NOT saved: ${e?.message || e}`));
   }, []);
 
-  return [payments, save];
+  return [payments, save, status];
 }
