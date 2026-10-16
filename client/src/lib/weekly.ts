@@ -200,17 +200,30 @@ export function lowestPoint(rows: WeekRow[]): WeekRow | null {
 
 // ── Per-account weekly ledger ──
 
+/** A business's own allocation order, from the helper's waterfall.json (Katie, 16 Oct 2026 -
+ *  PFANZ): a licence fee taken as a % of what is left after BAS, and Materials & Subs on that
+ *  same after-BAS amount. null = the standard order (every builder, EBS). */
+export interface Waterfall {
+  licenceFee?: { pct: number; label: string };
+  matsubsBase?: string;
+}
+/** The licence fee's own ledger row - only present when the business has one. */
+export const LICENCE_KEY = "licence";
+type Alloc = AccountBalances & { licence: number };
+
 /** Split gross income across PF accounts (same rules as the monthly engine). */
-function allocateIncome(gross: number, alloc: AccountBalances): AccountBalances {
+function allocateIncome(gross: number, alloc: AccountBalances, wf: Waterfall | null = null): Alloc {
   const bas = gross * (alloc.bas / 100);
-  const materials = gross * (alloc.materials / 100);
-  const realRev = Math.max(0, gross - bas - materials);
+  const afterBas = gross - bas;
+  const licence = wf?.licenceFee ? afterBas * (wf.licenceFee.pct / 100) : 0;
+  const materials = (wf?.matsubsBase === "afterBas" ? afterBas : gross) * (alloc.materials / 100);
+  const realRev = Math.max(0, gross - bas - licence - materials);
   const profit = realRev * (alloc.profit / 100);
   const ownersPay = realRev * (alloc.ownersPay / 100);
   const tax = realRev * (alloc.tax / 100);
   const opex = realRev * (alloc.opex / 100);
-  const income = gross - (bas + materials + profit + ownersPay + tax + opex);
-  return { income, bas, materials, profit, ownersPay, tax, opex };
+  const income = gross - (bas + licence + materials + profit + ownersPay + tax + opex);
+  return { income, bas, materials, profit, ownersPay, tax, opex, licence };
 }
 
 /** Transfers actually made out of Income, saved by the Allocation Calculator's
@@ -233,8 +246,8 @@ export function weekIndexOf(weekStart: string, iso: string, numWeeks: number): n
 /** Split a week's income when a fee comes off first (Katie, 16 Oct 2026):
  *  GST (BAS %) is worked out on the FULL income, the fee comes off, and only
  *  what is left is split into Real Revenue accounts. */
-function allocateAfterFee(gross: number, fee: number, alloc: AccountBalances): AccountBalances {
-  if (fee <= 0) return allocateIncome(gross, alloc);
+function allocateAfterFee(gross: number, fee: number, alloc: AccountBalances, wf: Waterfall | null = null): Alloc {
+  if (fee <= 0) return allocateIncome(gross, alloc, wf);
   const bas = gross * (alloc.bas / 100);
   const afterFee = gross - fee;
   const materials = afterFee * (alloc.materials / 100);
@@ -244,7 +257,7 @@ function allocateAfterFee(gross: number, fee: number, alloc: AccountBalances): A
   const tax = realRev * (alloc.tax / 100);
   const opex = realRev * (alloc.opex / 100);
   const income = afterFee - (bas + materials + profit + ownersPay + tax + opex);
-  return { income, bas, materials, profit, ownersPay, tax, opex };
+  return { income, bas, materials, profit, ownersPay, tax, opex, licence: 0 };
 }
 
 /** This week's real starting point (Katie, 16 Oct 2026): the bank balance right
@@ -332,8 +345,14 @@ export function buildAccountWeeks(
   /** What-if expenses (Weekly What-If only - the cash flow table passes none). */
   whatIfOut: WeeklyItem[] = [],
   /** % of income taken at source that is paid FROM OpEx (EBS: the Ignition fee). */
-  opexFeePct = 0
-): Record<AccountKey, AccountWeekRow[]> {
+  opexFeePct = 0,
+  /** This business's own order (PFANZ: a licence fee after BAS). null = standard. */
+  wf: Waterfall | null = null
+): Record<AccountKey, AccountWeekRow[]> & { licence?: AccountWeekRow[] } {
+  // The licence fee gets its own ledger row, right after BAS - only when the business has one.
+  const KEYS: string[] = wf?.licenceFee
+    ? [ACCOUNT_KEYS[0], ACCOUNT_KEYS[1], LICENCE_KEY, ...ACCOUNT_KEYS.slice(2)]
+    : [...ACCOUNT_KEYS];
   const whatIfMap: Record<number, Record<string, number>> = {};
   for (const it of whatIfOut) {
     if (it.type !== "out" || !it.account) continue;
@@ -376,13 +395,13 @@ export function buildAccountWeeks(
   }
 
   const running: Record<string, number> = {};
-  for (const k of ACCOUNT_KEYS) running[k] = data.openingByAccount?.[k] ?? 0;
+  for (const k of KEYS) running[k] = (data.openingByAccount as Record<string, number> | undefined)?.[k] ?? 0;
   // Income always opens at $0 - it is swept to zero every week (Katie, 16 Oct 2026),
   // whatever Xero's book balance says.
   running.income = 0;
 
-  const out = {} as Record<AccountKey, AccountWeekRow[]>;
-  for (const k of ACCOUNT_KEYS) out[k] = [];
+  const out = {} as Record<string, AccountWeekRow[]>;
+  for (const k of KEYS) out[k] = [];
 
   for (let w = 0; w < numWeeks; w++) {
     // A typed estimate for the week wins over invoices / the flat assumption
@@ -393,18 +412,18 @@ export function buildAccountWeeks(
     // Katie, 16 Oct 2026: the Stripe fee comes off first and only what is left is
     // split. Not on an actual week - that payout already had the fee taken.
     const fee = act ? 0 : Math.round(gross * (feePct / 100) * 100) / 100;
-    const alloc = allocateAfterFee(gross, fee, allocations); // per-account inflow (forecast)
+    const alloc = allocateAfterFee(gross, fee, allocations, wf) as Record<string, number>; // per-account inflow (forecast)
     // The Ignition fee leaves Income at source too, but it is OpEx's cost: OpEx gets its
     // full share and pays the fee. Not on an actual week - the real transfers already did.
     const opexFee = act ? 0 : Math.round(gross * (opexFeePct / 100) * 100) / 100;
     const sumOut = (src: Partial<Record<string, number>>) =>
-      ACCOUNT_KEYS.reduce((s, k) => (k === "income" ? s : s + (src[k] ?? 0)), 0);
+      KEYS.reduce((s, k) => (k === "income" ? s : s + (src[k] ?? 0)), 0);
     const expectedOut = sumOut(alloc);
     // Total swept out of Income = everything allocated to the other accounts.
     const allocOutTotal = act ? sumOut(act) : expectedOut;
     const isNowWeek = !!now && now.week === isoLocal(weekCommencing(data.weekStart, w));
     const basPaid = basInWeek(basPayments, weekCommencing(data.weekStart, w));
-    for (const k of ACCOUNT_KEYS) {
+    for (const k of KEYS) {
       const paidAto = (k === "bas" ? basPaid : 0) + (whatIfMap[w]?.[k] ?? 0);
       const whatIf = whatIfMap[w]?.[k] ?? 0;
       if (isNowWeek && now!.balances[k] !== undefined) {
@@ -472,7 +491,7 @@ export function buildAccountWeeks(
       running[k] = closing;
     }
   }
-  return out;
+  return out as Record<AccountKey, AccountWeekRow[]> & { licence?: AccountWeekRow[] };
 }
 
 
@@ -568,11 +587,11 @@ export function buildWiseWeeks(
 // ── How much more income stops an account going red (Katie, 16 Oct 2026) ──
 
 /** What each account receives from $1 of income, after the Stripe fee and her PF %. */
-export function shareOfIncome(alloc: AccountBalances, feePct: number): Record<string, number> {
+export function shareOfIncome(alloc: AccountBalances, feePct: number, wf: Waterfall | null = null): Record<string, number> {
   const g = 10000; // the split is a straight line, so any amount gives the same share
-  const a = allocateAfterFee(g, g * (feePct / 100), alloc);
+  const a = allocateAfterFee(g, g * (feePct / 100), alloc, wf) as Record<string, number>;
   const out: Record<string, number> = {};
-  for (const k of ACCOUNT_KEYS) out[k] = k === "income" ? 0 : a[k] / g;
+  for (const k of [...ACCOUNT_KEYS, LICENCE_KEY]) out[k] = k === "income" ? 0 : (a[k] ?? 0) / g;
   return out;
 }
 

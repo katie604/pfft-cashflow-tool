@@ -38,6 +38,7 @@ import {
   buildWiseWeeks,
   isoLocal,
   weekCommencing,
+  LICENCE_KEY,
 } from "@/lib/weekly";
 import { useIncomeEstimates, useActualTransfers, useMonthlyBills } from "@/components/WeeklyTable";
 import { Period, PERIODS, GraphPoint, groupWeeks, groupRows } from "@/lib/graphPeriods";
@@ -59,7 +60,7 @@ interface AccountGraphsProps {
 export default function AccountGraphs({ settings, weekly }: AccountGraphsProps) {
   const [period, setPeriod] = useState<Period>("fortnightly"); // Katie, 16 Oct 2026
   const [basPayments] = useBasPayments();
-  const [estimates, , feePct, nowBal, , opexFeePct] = useIncomeEstimates();
+  const [estimates, , feePct, nowBal, , opexFeePct, , wf] = useIncomeEstimates();
   const actuals = useActualTransfers();
   const bills = useMonthlyBills();
   const recurring = weekly.recurringLines ?? [];
@@ -80,7 +81,7 @@ export default function AccountGraphs({ settings, weekly }: AccountGraphsProps) 
 
   const acct = buildAccountWeeks(
     weekly, GRAPH_WEEKS, settings.allocations, weekly.incomeOverride ?? 0,
-    recurring, actuals, est, feePct, nowBal, basPayments, [], opexFeePct
+    recurring, actuals, est, feePct, nowBal, basPayments, [], opexFeePct, wf
   );
   const wise = buildWiseWeeks(weekly, GRAPH_WEEKS, recurring, bills, nowBal);
   const { groupOf, labels } = groupWeeks(weekly.weekStart, GRAPH_WEEKS, period);
@@ -88,7 +89,7 @@ export default function AccountGraphs({ settings, weekly }: AccountGraphsProps) 
   // The total, the way the table's Total view works: money in = new income,
   // money out = what actually leaves; moves between accounts net to zero.
   const totalRows: AccountWeekRow[] = acct.income.map((inc, w) => {
-    const all = ACCOUNT_KEYS.map((k) => acct[k][w]);
+    const all = ACCOUNT_KEYS.map((k) => acct[k][w]).concat(acct.licence ? [acct.licence[w]] : []);
     const opening = all.reduce((t, r) => t + r.opening, 0) + wise[w].opening;
     const closing = Math.round((all.reduce((t, r) => t + r.closing, 0) + wise[w].closing) * 100) / 100;
     const moneyIn = all.some((r) => r.stillToGo) ? 0 : inc.moneyIn;
@@ -99,6 +100,14 @@ export default function AccountGraphs({ settings, weekly }: AccountGraphsProps) 
   const charts: ChartAccount[] = [
     ...ACCOUNT_CONFIGS.map((a) => ({ key: a.key, label: a.label, colorHex: a.colorHex, description: a.description })),
   ];
+  // The licence fee's own graph, after BAS - only for a business that has one (PFANZ).
+  if (wf?.licenceFee)
+    charts.splice(charts.findIndex((c) => c.key === "bas") + 1, 0, {
+      key: LICENCE_KEY as AccountKey,
+      label: wf.licenceFee.label,
+      colorHex: "#7a4fa8",
+      description: `${wf.licenceFee.pct}% of what is left after BAS`,
+    });
   const opexAt = charts.findIndex((c) => c.key === "opex");
   charts.splice(opexAt + 1, 0, WISE_CFG);
 

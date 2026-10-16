@@ -24,6 +24,8 @@ import {
   WeeklyItem,
   shareOfIncome,
   incomeNeeded,
+  Waterfall,
+  LICENCE_KEY,
 } from "@/lib/weekly";
 import {
   formatCurrency,
@@ -99,6 +101,123 @@ function IncomeInRow({
   );
 }
 
+/** One member's charge in a week - from the helper's income_members.json (PFANZ, GHL's live
+ *  subscriptions). Katie, 16 Oct 2026: "click the dropdown and see who goes in there". */
+interface MemberCharge {
+  name: string;
+  amount: number;
+  date: string;
+  status: string;
+  counted: boolean;
+  every: string;
+  basis: string;
+}
+
+/** Who pays in each week, keyed by the week's Monday. Empty for a business without it. */
+function useIncomeMembers(): [Record<string, MemberCharge[]>, string] {
+  const [m, setM] = useState<Record<string, MemberCharge[]>>({});
+  const [pulled, setPulled] = useState("");
+  useEffect(() => {
+    let t = "";
+    try {
+      t = localStorage.getItem("kcc-tenant") || localStorage.getItem("pfft-pf-alloc-xero-tenant") || "";
+    } catch {
+      /* storage blocked */
+    }
+    if (!t) return;
+    fetch(`http://127.0.0.1:8765/api/income?tenant=${encodeURIComponent(t)}`)
+      .then((r) => r.json())
+      .then((d) => {
+        setM((d?.members ?? {}) as Record<string, MemberCharge[]>);
+        setPulled(String(d?.membersPulled ?? ""));
+      })
+      .catch(() => {
+        /* helper not running */
+      });
+  }, []);
+  return [m, pulled];
+}
+
+const dayLabel = (iso: string) =>
+  new Date(iso + "T00:00:00").toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short" });
+
+/** "Who pays" under Income in: each week shows how many members, click it to drop down the list. */
+function MembersRow({
+  account,
+  rows,
+  members,
+  pulled,
+}: {
+  account: (typeof ACCOUNT_CONFIGS)[number];
+  rows: AccountWeekRow[];
+  members: Record<string, MemberCharge[]>;
+  pulled: string;
+}) {
+  const [open, setOpen] = useState<string | null>(null);
+  const list = open ? [...(members[open] ?? [])].sort((a, b) => a.date.localeCompare(b.date) || a.name.localeCompare(b.name)) : [];
+  const counted = list.filter((x) => x.counted);
+  const total = Math.round(counted.reduce((t, x) => t + x.amount, 0) * 100) / 100;
+  return (
+    <>
+      <tr className="bg-white hover:bg-muted/40 transition-colors">
+        <td className="sticky-col px-4 py-2 border-b border-border/50 bg-white" style={{ borderLeftColor: account.colorHex + "60" }}>
+          <span className="text-xs pl-5 text-muted-foreground">Who pays</span>
+          <div className="text-[10px] pl-5 text-muted-foreground/60">members from GHL - click a week</div>
+        </td>
+        {rows.map((r) => {
+          const iso = isoLocal(r.weekCommencing);
+          const L = members[iso] ?? [];
+          const n = L.filter((x) => x.counted).length;
+          return (
+            <td key={r.week} className="px-2 py-2 text-right border-b border-border/50 text-xs">
+              {L.length ? (
+                <button
+                  type="button"
+                  className="who-pays underline decoration-dotted"
+                  style={{ color: IN }}
+                  onClick={() => setOpen(open === iso ? null : iso)}
+                >
+                  {n} {n === 1 ? "member" : "members"} {open === iso ? "\u25B4" : "\u25BE"}
+                </button>
+              ) : (
+                "\u2013"
+              )}
+            </td>
+          );
+        })}
+      </tr>
+      {open && (
+        <tr className="who-pays-list bg-muted/20">
+          <td colSpan={rows.length + 1} className="px-6 py-3 border-b border-border/50 text-xs">
+            <div className="font-semibold mb-1">
+              Week of {dayLabel(open)}: {counted.length} {counted.length === 1 ? "member" : "members"}, {formatCurrency(total)} inc GST
+            </div>
+            <table className="text-xs">
+              <tbody>
+                {list.map((x, i) => (
+                  <tr key={i} style={{ color: x.counted ? undefined : "#8b8b8b" }}>
+                    <td className="pr-4 py-0.5">{dayLabel(x.date)}</td>
+                    <td className="pr-4 py-0.5">{x.name}</td>
+                    <td className="pr-4 py-0.5 text-right">{formatCurrency(x.amount)}</td>
+                    <td className="pr-4 py-0.5">every {x.every}</td>
+                    <td className="py-0.5">
+                      {x.counted ? "" : `${x.status.replace("_", " ")} - not counted`}
+                      {x.basis.startsWith("PLAN") ? " (plan price - not charged yet)" : ""}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div className="text-[10px] text-muted-foreground mt-1">
+              From GHL's live subscriptions{pulled ? `, pulled ${pulled.replace("T", " ")}` : ""}. The amount is what each member was last actually charged.
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
 /** One fee taken off the income before the split (Katie, 16 Oct 2026: Stripe fee,
  *  then the Ignition fee under it). */
 export interface IncomeFee {
@@ -117,8 +236,11 @@ export function useIncomeEstimates(): [
   IncomeFee[],
   number,
   IncomeFee[],
+  Waterfall | null,
 ] {
   const [est, setEst] = useState<Record<string, number>>({});
+  // This business's own allocation order (PFANZ, Katie 16 Oct 2026) - null = standard.
+  const [wf, setWf] = useState<Waterfall | null>(null);
   const [feePct, setFeePct] = useState(0);
   const [fees, setFees] = useState<IncomeFee[]>([]);
   const [nowBal, setNowBal] = useState<NowBalances | null>(null);
@@ -145,6 +267,8 @@ export function useIncomeEstimates(): [
             : Number(d?.feePct ?? 0)
         );
         setNowBal((d?.now ?? null) as NowBalances | null);
+        const w = d?.waterfall as Waterfall | undefined;
+        setWf(w && (w.licenceFee || w.matsubsBase) ? w : null);
       })
       .catch(() => {
         /* helper not running */
@@ -168,7 +292,7 @@ export function useIncomeEstimates(): [
       });
   };
   const opexFeePct = Math.round(fees.filter((f) => f.from === "opex").reduce((t, f) => t + f.pct, 0) * 100) / 100;
-  return [est, save, feePct, nowBal, fees.filter((f) => f.from !== "opex"), opexFeePct, fees.filter((f) => f.from === "opex")];
+  return [est, save, feePct, nowBal, fees.filter((f) => f.from !== "opex"), opexFeePct, fees.filter((f) => f.from === "opex"), wf];
 }
 
 /** The Team heading: a dropdown showing the weekly team total, click to open. */
@@ -471,7 +595,8 @@ export default function WeeklyTable({
 
   const override = weekly.incomeOverride ?? 0;
   const recurringLines = weekly.recurringLines ?? [];
-  const [realEstimates, setEstimate, feePct, nowBal, incomeFees, opexFeePct, opexFees] = useIncomeEstimates();
+  const [realEstimates, setEstimate, feePct, nowBal, incomeFees, opexFeePct, opexFees, wf] = useIncomeEstimates();
+  const [incomeMembers, membersPulled] = useIncomeMembers();
   // On the What-If, the week's income = the play weekly figure (or the real
   // estimate, or the invoices) plus any one-off income added there.
   let estimates = realEstimates;
@@ -515,9 +640,10 @@ export default function WeeklyTable({
     nowBal,
     basPayments,
     whatIfItems,
-    opexFeePct
+    opexFeePct,
+    wf
   );
-  const share = shareOfIncome(allocations, feePct);
+  const share = shareOfIncome(allocations, feePct, wf);
   // OpEx also pays the Ignition fee on any extra income, so it keeps less of each $1.
   share.opex = (share.opex ?? 0) - opexFeePct / 100;
   const hasItems = weekly.items.length > 0 || override > 0;
@@ -527,7 +653,7 @@ export default function WeeklyTable({
   let cumIn = 0;
   let cumOut = 0;
   const totals: WeekRow[] = rows.map((base, w) => {
-    const all = ACCOUNT_KEYS.map((k) => accountRows[k][w]);
+    const all = ACCOUNT_KEYS.map((k) => accountRows[k][w]).concat(accountRows.licence ? [accountRows.licence[w]] : []);
     const wr = wiseRows[w];
     const opening = Math.round((all.reduce((t, r) => t + r.opening, 0) + (wr?.opening ?? 0)) * 100) / 100;
     const closing = Math.round((all.reduce((t, r) => t + r.closing, 0) + (wr?.closing ?? 0)) * 100) / 100;
@@ -539,6 +665,23 @@ export default function WeeklyTable({
     cumOut += moneyOut;
     return { ...base, opening, closing, net, moneyIn, moneyOut, cumulativeIn: cumIn, cumulativeOut: cumOut };
   });
+
+  // The licence fee's own row, right after BAS - only for a business that has one (PFANZ).
+  const shownAccounts = wf?.licenceFee
+    ? [
+        ACCOUNT_CONFIGS[0],
+        ACCOUNT_CONFIGS[1],
+        {
+          ...ACCOUNT_CONFIGS[2],
+          key: LICENCE_KEY as AccountKey,
+          label: wf.licenceFee.label,
+          shortLabel: "LIC",
+          colorHex: "#7a4fa8",
+          description: `${wf.licenceFee.pct}% of what is left after BAS`,
+        },
+        ...ACCOUNT_CONFIGS.slice(2),
+      ]
+    : ACCOUNT_CONFIGS;
 
   const toggle = (k: AccountKey) =>
     setExpanded((prev) => {
@@ -702,9 +845,9 @@ export default function WeeklyTable({
           <tbody>
             {mode === "accounts" ? (
               <>
-              {ACCOUNT_CONFIGS.map((account) => {
+              {shownAccounts.map((account) => {
                 const isExpanded = expanded.has(account.key);
-                const ar = accountRows[account.key];
+                const ar = (accountRows as Record<string, AccountWeekRow[]>)[account.key];
                 const isIncome = account.key === "income";
                 const isToOpen = toOpen.has(account.key);
                 // Grey everything for an account the client hasn't opened yet.
@@ -747,6 +890,10 @@ export default function WeeklyTable({
                             ? "to open"
                             : isIncome
                             ? "Closing balance"
+                            : (account.key as string) === LICENCE_KEY
+                            ? `${wf?.licenceFee?.pct}% of what is left after BAS`
+                            : account.key === "materials" && wf?.matsubsBase === "afterBas"
+                            ? `${allocations.materials}% of what is left after BAS`
                             : `${allocations[account.key]}% of income`}
                         </div>
                         {isWhatIf && !isIncome && !isToOpen && ar.some((r) => r.closing < 0) && (() => {
@@ -778,6 +925,9 @@ export default function WeeklyTable({
                         {isIncome ? (
                           <>
                             <IncomeInRow account={acct} rows={ar} onSet={setEstimate} />
+                            {Object.keys(incomeMembers).length > 0 && (
+                              <MembersRow account={acct} rows={ar} members={incomeMembers} pulled={membersPulled} />
+                            )}
                             {whatIfIncome.map((it) => (
                               <WhatIfRow key={it.id} account={acct} item={it} numWeeks={numWeeks} onDelete={() => whatIf!.deleteItem(it.id)} />
                             ))}
